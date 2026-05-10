@@ -1,0 +1,327 @@
+"""
+Censor -- Biomimetic Dual-Pathway Micro-Expression Recognition System
+=====================================================================
+Main entry point. Instantiates the full Censor model and runs a forward pass
+with dummy input to verify tensor shapes and signal flow.
+
+Usage:
+    python main.py
+
+Expected output:
+    Each module prints its input/output tensor shapes.
+    Final output:
+        - me_logits: (2, 7) micro-expression logits
+        - au_intensities: (2, 16, 28) AU intensities
+        - au_opd: (2, 28, 3) onset-peak-decay landmarks
+        - apex_scores: (2, T/16) apex frame scores
+        - expert_gates: (2, 3) MoE gating weights
+        - template_reports: list of 2 structured clinical reports
+"""
+
+import torch
+import torch.nn as nn
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent))
+
+from config.defaults import (
+    INPUT_CONFIG,
+    FAST_PATHWAY_CONFIG,
+    SLOW_PATHWAY_CONFIG,
+    AMYGDALA_CONFIG,
+    FFA_CONFIG,
+    CASA_CONFIG,
+    FUSION_CONFIG,
+    AU_DECODER_CONFIG,
+    MOE_CONFIG,
+    RADAR_CONFIG,
+)
+
+from model.preprocessing import SaliencyDetector, rPPGExtractor, TVL1OpticalFlow
+from model.backbones import FastSubcorticalPathway, SlowCorticalPathway
+from model.attention import Amygdala, FFA, CASANet
+from model.fusion import TSFmicroFusion
+from model.decoders import DynamicAUDecoder
+from model.moe_head import MoEGatingNetwork, PersonalizedRadar
+from model.llm_report import EmotionReporter
+
+
+# =============================================================================
+# Censor -- Main Model Orchestrator
+# =============================================================================
+
+class Censor(nn.Module):
+    """
+    Censor: Biomimetic Dual-Pathway Micro-Expression Recognition System.
+
+    The complete pipeline:
+        Input (B, 3, T, H, W) RGB video
+          -> Preprocessing: Saliency, rPPG, TV-L1 Optical Flow
+          -> Dual Pathways: Fast (3D ResNet18) + Slow (3D Swin-Transformer)
+          -> Attention Modulation: Amygdala + FFA + CASANet
+          -> TSFmicroFusion: Bidirectional cross-attention fusion
+          -> DynamicAUDecoder: BiLSTM + 28 AUs + OPD landmarks
+          -> MoE Head: 3 experts + test-time personalization
+          -> EmotionReporter: Structured clinical reports
+    """
+
+    def __init__(self):
+        super().__init__()
+
+        # =====================================================================
+        # Stage 1: Biomimetic Preprocessing
+        # =====================================================================
+        print("[Censor] Initializing Preprocessing...")
+        self.saliency = SaliencyDetector()
+        self.rppg = rPPGExtractor()
+        self.flow = TVL1OpticalFlow()
+
+        # =====================================================================
+        # Stage 2: Dual-Pathway Backbones
+        # =====================================================================
+        print("[Censor] Initializing Dual-Pathway Backbones...")
+        self.fast_pathway = FastSubcorticalPathway(FAST_PATHWAY_CONFIG)
+        self.slow_pathway = SlowCorticalPathway(SLOW_PATHWAY_CONFIG)
+
+        # =====================================================================
+        # Stage 3: Fusiform-Amygdala Attention Circuit
+        # =====================================================================
+        print("[Censor] Initializing Attention Modulation...")
+        self.amygdala = Amygdala(AMYGDALA_CONFIG)
+        self.ffa = FFA(FFA_CONFIG)
+        self.casa = CASANet(CASA_CONFIG)
+
+        # =====================================================================
+        # Stage 4: Spatio-Temporal Fusion
+        # =====================================================================
+        print("[Censor] Initializing TSFmicroFusion...")
+        self.fusion = TSFmicroFusion(FUSION_CONFIG)
+
+        # =====================================================================
+        # Stage 5: Dynamic AU Decoder
+        # =====================================================================
+        print("[Censor] Initializing AU Decoder...")
+        self.au_decoder = DynamicAUDecoder(AU_DECODER_CONFIG)
+
+        # =====================================================================
+        # Stage 6: MoE Head & Personalized Radar
+        # =====================================================================
+        print("[Censor] Initializing MoE Head...")
+        self.moe = MoEGatingNetwork(MOE_CONFIG)
+        self.radar = PersonalizedRadar(RADAR_CONFIG)
+
+        # =====================================================================
+        # Stage 7: Emotion Reporter
+        # =====================================================================
+        print("[Censor] Initializing Emotion Reporter...")
+        self.reporter = EmotionReporter()
+
+        print("[Censor] Model initialized successfully!\n")
+
+    def forward(self, x):
+        """
+        Full forward pass of the Censor model.
+
+        Args:
+            x (torch.Tensor): Raw RGB video, shape (B, C=3, T=16, H=224, W=224)
+
+        Returns:
+            dict with keys:
+                - 'me_logits': (B, 7) micro-expression logits
+                - 'au_intensities': (B, T, 28) AU intensities per frame
+                - 'au_opd': (B, 28, 3) onset-peak-decay landmarks
+                - 'apex_scores': (B, T_apa) apex frame scores
+                - 'expert_gates': (B, 3) MoE gating weights
+                - 'adapted_feat': (B, 1024) personalized features
+                - 'template_report': list[str] structured reports
+                - 'llm_report': list[str] free-text reports (placeholder)
+        """
+        print(f"\n{'='*60}")
+        print(f" Censor Forward Pass")
+        print(f"{'='*60}")
+        print(f"Input video: {x.shape}")
+
+        B, C, T, H, W = x.shape
+
+        # =====================================================================
+        # Stage 1: Preprocessing
+        # =====================================================================
+        print(f"\n--- Stage 1: Preprocessing ---")
+
+        # 1a) Saliency detection (fovea simulation)
+        # Output: (B, 1, T, H, W) spatial prior map
+        saliency_map = self.saliency(x)
+        # Apply saliency modulation: weighted input
+        x_salient = x * (1.0 + 0.3 * saliency_map.expand(-1, C, -1, -1, -1))
+
+        # 1b) rPPG blood-flow heatmap
+        # Output: (B, 3, T, H, W) blood-flow signal
+        rppg_heatmap = self.rppg(x_salient)
+
+        # 1c) TV-L1 optical flow between consecutive frames
+        # Output per pair: (B, 2, H, W) -> stacked: (B, 2, T, H, W)
+        flow_maps = []
+        for t in range(T - 1):
+            flow_t = self.flow(
+                x_salient[:, :, t],    # Previous frame
+                x_salient[:, :, t + 1]  # Current frame
+            )  # (B, 2, H, W)
+            flow_maps.append(flow_t)
+        flow_stack = torch.stack(flow_maps, dim=2)  # (B, 2, T-1, H, W)
+        # Pad last frame with duplicate of previous flow
+        flow_pad = flow_stack[:, :, -1:, :, :]
+        flow_stack = torch.cat([flow_stack, flow_pad], dim=2)  # (B, 2, T, H, W)
+        print(f"[Censor] Flow stack: {flow_stack.shape}")
+
+        # =====================================================================
+        # Stage 2: Dual-Pathway Backbones
+        # =====================================================================
+        print(f"\n--- Stage 2: Dual-Pathway Backbones ---")
+
+        # Fast Pathway (subcortical): optical flow input
+        # Input: (B, 2, T, H, W) -> Output: (B, 512)
+        fast_feat = self.fast_pathway(flow_stack)
+
+        # Slow Pathway (cortical): RGB + rPPG concatenated
+        # Input: (B, 6, T, H, W) -> Output: (B, 768) pooled + (B, 768, T/16, H/32, W/32) spatial
+        rgb_rppg = torch.cat([x_salient, rppg_heatmap], dim=1)  # (B, 6, T, H, W)
+        slow_feat, slow_spatial = self.slow_pathway(rgb_rppg)
+
+        # =====================================================================
+        # Stage 3: Attention Modulation
+        # =====================================================================
+        print(f"\n--- Stage 3: Attention Modulation ---")
+
+        # Amygdala: generates Attention Prior Map from fast features
+        # Input: (B, 512) -> Output: (B, 1, 14, 14)
+        apm = self.amygdala(fast_feat)
+
+        # FFA: mutual channel recalibration between pathways
+        # Inputs: (B, 512), (B, 768) -> Outputs: (B, 512), (B, 768)
+        fast_gated, slow_gated = self.ffa(fast_feat, slow_feat)
+
+        # CASANet: 3D contextual attention on Slow pathway spatial map
+        # Input: (B, 768, T_s, H_s, W_s) -> Output: (B, 768, T_s, H_s, W_s) + (B, T_s) apex scores
+        if slow_spatial is not None:
+            casa_feat, apex_scores = self.casa(slow_spatial)
+            # Pool spatial map from CASANet for fusion
+            casa_pooled = casa_feat.mean(dim=[-1, -2, -3])  # (B, 768)
+            # Gate: blend original slow_gated with CASA-attended features
+            casa_gate = torch.sigmoid(casa_pooled.mean(dim=1, keepdim=True))  # (B, 1)
+            slow_for_fusion = casa_gate * casa_pooled + (1 - casa_gate) * slow_gated
+        else:
+            # Fallback if spatial map is None
+            casa_feat = None
+            apex_scores = torch.zeros(B, 1, device=x.device)
+            slow_for_fusion = slow_gated
+
+        # =====================================================================
+        # Stage 4: TSFmicroFusion
+        # =====================================================================
+        print(f"\n--- Stage 4: TSFmicroFusion ---")
+
+        fused_feat = self.fusion(fast_gated, slow_for_fusion)  # (B, 1024)
+
+        # =====================================================================
+        # Stage 5: Dynamic AU Decoder
+        # =====================================================================
+        print(f"\n--- Stage 5: AU Decoder ---")
+
+        au_intensities, au_opd = self.au_decoder(fused_feat)  # (B, 16, 28), (B, 28, 3)
+
+        # =====================================================================
+        # Stage 6: MoE Head & Personalized Radar
+        # =====================================================================
+        print(f"\n--- Stage 6: MoE Head ---")
+
+        me_logits, expert_gates, moe_aux_loss = self.moe(fused_feat)  # (B, 7), (B, 3), scalar
+
+        # Personalized Radar (test-time adaptation, skip in debug forward)
+        adapted_feat = self.radar(fused_feat)  # (B, 1024) - identity pass in debug
+
+        # =====================================================================
+        # Stage 7: Emotion Reporter
+        # =====================================================================
+        print(f"\n--- Stage 7: Emotion Reporter ---")
+
+        template_reports, llm_reports = self.reporter(fused_feat, au_intensities, me_logits)
+
+        # =====================================================================
+        # Final Summary
+        # =====================================================================
+        print(f"\n{'='*60}")
+        print(f" Final Output Summary")
+        print(f"{'='*60}")
+        print(f"  ME Logits:       {me_logits.shape}")
+        print(f"  AU Intensities:  {au_intensities.shape}")
+        print(f"  AU OPD:          {au_opd.shape}")
+        print(f"  Apex Scores:     {apex_scores.shape}")
+        print(f"  Expert Gates:    {expert_gates.shape}")
+        print(f"  MoE Aux Loss:    {moe_aux_loss.item():.6f}")
+        print(f"  Adapted Feat:    {adapted_feat.shape}")
+        print(f"  Reports:         {len(template_reports)} templates")
+        print(f"{'='*60}\n")
+
+        return {
+            'me_logits': me_logits,
+            'au_intensities': au_intensities,
+            'au_opd': au_opd,
+            'apex_scores': apex_scores,
+            'expert_gates': expert_gates,
+            'moe_aux_loss': moe_aux_loss,
+            'adapted_feat': adapted_feat,
+            'template_report': template_reports,
+            'llm_report': llm_reports,
+        }
+
+
+# =============================================================================
+# Main Entry Point
+# =============================================================================
+
+if __name__ == '__main__':
+    print("=" * 60)
+    print(" Censor -- Biomimetic Dual-Pathway MER System")
+    print("=" * 60)
+
+    # Build model
+    model = Censor()
+
+    # Count parameters
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total parameters:     {total_params:>12,}")
+    print(f"Trainable parameters: {trainable_params:>12,}")
+    print()
+
+    # Create dummy input: (B=2, C=3, T=16, H=224, W=224)
+    dummy_input = torch.randn(2, 3, 16, 224, 224)
+    print(f"\nDummy input shape: {dummy_input.shape}")
+
+    # Forward pass
+    with torch.no_grad():
+        outputs = model(dummy_input)
+
+    print("\n" + "=" * 60)
+    print(" Forward Pass Completed Successfully!")
+    print("=" * 60)
+
+    # Print sample report
+    print("\nSample template report (Subject 0):")
+    print("-" * 40)
+    print(outputs['template_report'][0])
+
+    # Verify all expected keys present
+    expected_keys = [
+        'me_logits', 'au_intensities', 'au_opd', 'apex_scores',
+        'expert_gates', 'moe_aux_loss', 'adapted_feat',
+        'template_report', 'llm_report'
+    ]
+    missing_keys = [k for k in expected_keys if k not in outputs]
+    if missing_keys:
+        print(f"\nWARNING: Missing output keys: {missing_keys}")
+    else:
+        print("\nAll expected output keys present. Verification complete.")
+
+    print("\nDone.")

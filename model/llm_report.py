@@ -7,7 +7,7 @@
 #
 # Two report paths:
 #   1. Template-based (primary): Deterministic, clinically structured reports
-#   2. LLM-based (secondary): Free-text via HuggingFace OPT-125M
+#   2. LLM-based (secondary): Free-text via DeepSeek API (or fallback to OPT-125M)
 #
 # Mathematical formulation (template path):
 #   report = template.format(
@@ -17,12 +17,65 @@
 #       OPD_landmarks=opd_detected
 #   )
 #
-# LLM path uses meta-llama/opt-125m for lightweight free-text generation.
+# LLM path uses DeepSeek API by default, with local fallback.
 # =============================================================================
 
 import torch
 import torch.nn as nn
+import requests
+import json
 from config.defaults import LLM_CONFIG
+
+
+# =============================================================================
+# DeepSeek API Client
+# =============================================================================
+
+class DeepSeekClient:
+    """
+    DeepSeek API client for free-text emotion report generation.
+    """
+
+    def __init__(self, api_key=None, model="deepseek-chat", base_url="https://api.deepseek.com/v1"):
+        self.api_key = api_key
+        self.model = model
+        self.base_url = base_url
+
+    def generate(self, prompt, max_tokens=100):
+        """Generate text from DeepSeek API"""
+        if not self.api_key:
+            return None
+
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+
+            data = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+                "temperature": 0.7
+            }
+
+            response = requests.post(
+                f"{self.base_url}/chat/completions",
+                headers=headers,
+                json=data,
+                timeout=30
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                return result['choices'][0]['message']['content']
+            else:
+                print(f"[DeepSeek] Error: {response.status_code}")
+                return None
+
+        except Exception as e:
+            print(f"[DeepSeek] Exception: {e}")
+            return None
 
 
 # =============================================================================
@@ -71,50 +124,57 @@ class EmotionReporter(nn.Module):
                 nn.init.xavier_uniform_(module.weight)
                 nn.init.constant_(module.bias, 0)
 
-        # LLM: OPT-125M for lightweight free-text generation
-        # Uses a prompt-based approach: given emotion features, generate clinical description
+        # Initialize DeepSeek API (with local fallback)
         self._init_llm()
 
     def _init_llm(self):
         """
-        Initialize HuggingFace OPT-125M for LLM-based report generation.
-
-        OPT-125M is a causal language model with 125M parameters, suitable for
-        CPU/small GPU deployment. It generates free-text clinical descriptions
-        from structured emotion features.
+        Initialize DeepSeek API for LLM-based report generation.
+        Falls back to OPT-125M if API is not available.
         """
+        # Try DeepSeek first
+        api_key = None
+        try:
+            import os
+            # Check environment and config
+            api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        except:
+            pass
+
+        if api_key:
+            self.deepseek = DeepSeekClient(api_key=api_key)
+            self._llm_available = True
+            print("[EmotionReporter] DeepSeek API initialized!")
+            self._use_deepseek = True
+            return
+
+        # Fallback to local OPT-125M
+        self._use_deepseek = False
         try:
             from transformers import AutoModelForCausalLM, AutoTokenizer
             import os
 
-            # Use a small model to avoid large downloads
             model_name = "facebook/opt-125m"
-
             print(f"[EmotionReporter] Loading OPT-125M from HuggingFace...")
             cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
             os.makedirs(cache_dir, exist_ok=True)
 
             self.tokenizer = AutoTokenizer.from_pretrained(
-                model_name,
-                trust_remote_code=True,
-                cache_dir=cache_dir
+                model_name, trust_remote_code=True, cache_dir=cache_dir
             )
             self.llm = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                trust_remote_code=True,
-                cache_dir=cache_dir
+                model_name, trust_remote_code=True, cache_dir=cache_dir
             )
-            self.llm.eval()  # Inference mode
+            self.llm.eval()
 
-            # Set pad token (OPT doesn't have one by default)
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
 
             self._llm_available = True
-            print(f"[EmotionReporter] OPT-125M loaded successfully!")
+            print("[EmotionReporter] OPT-125M loaded successfully!")
         except Exception as e:
-            print(f"[EmotionReporter] WARNING: Could not load HuggingFace LLM: {e}")
-            print(f"[EmotionReporter] Falling back to template-only reports.")
+            print(f"[EmotionReporter] WARNING: Could not load LLM: {e}")
+            print("[EmotionReporter] Falling back to template-only reports.")
             self.llm = None
             self.tokenizer = None
             self._llm_available = False
@@ -174,6 +234,7 @@ class EmotionReporter(nn.Module):
     def _generate_llm_report(self, prompt, max_new_tokens=100):
         """
         Generate a free-text report using the LLM.
+        Prefers DeepSeek API, falls back to local OPT-125M.
 
         Args:
             prompt (str): Input prompt with emotion analysis results
@@ -184,6 +245,17 @@ class EmotionReporter(nn.Module):
         if not self._llm_available:
             return "[LLM unavailable]"
 
+        # Try DeepSeek API first
+        if getattr(self, '_use_deepseek', False) and hasattr(self, 'deepseek'):
+            result = self.deepseek.generate(prompt, max_tokens=max_new_tokens)
+            if result:
+                return result
+            print("[DeepSeek] API failed, trying local model...")
+
+        # Fallback to local OPT-125M
+        if self.llm is None or self.tokenizer is None:
+            return "[LLM unavailable]"
+
         try:
             inputs = self.tokenizer(
                 prompt,
@@ -191,7 +263,10 @@ class EmotionReporter(nn.Module):
                 padding=True,
                 truncation=True,
                 max_length=200
-            ).to(self.llm.device)
+            )
+
+            device = next(self.llm.parameters()).device
+            inputs = {k: v.to(device) for k, v in inputs.items()}
 
             with torch.no_grad():
                 outputs = self.llm.generate(

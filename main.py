@@ -36,15 +36,24 @@ from config.defaults import (
     AU_DECODER_CONFIG,
     MOE_CONFIG,
     RADAR_CONFIG,
+    SPARSE_CONTROL_CONFIG,
 )
 
-from model.preprocessing import SaliencyDetector, rPPGExtractor, TVL1OpticalFlow
+from model.preprocessing import (
+    SaliencyDetector, rPPGExtractor, TVL1OpticalFlow,
+    AdaptiveOpticalFlow, SaliencyDetectorE2E
+)
 from model.backbones import FastSubcorticalPathway, SlowCorticalPathway
-from model.attention import Amygdala, FFA, CASANet
+from model.attention import Amygdala, FFA, CASANet, AmygdalaWithPrior, CASANetLearnable
 from model.fusion import TSFmicroFusion
 from model.decoders import DynamicAUDecoder
-from model.moe_head import MoEGatingNetwork, PersonalizedRadar
+from model.moe_head import (
+    MoEGatingNetwork, PersonalizedRadar,
+    PersonalizedRadarEnhanced
+)
+from model.biomoe import BioMoE  # Add Standard MoE comparison
 from model.llm_report import EmotionReporter
+from model.biomimetic_enhance import LongTermMemorySparseControl, SparseControlWrapper, TemporalSparseControl
 
 
 # =============================================================================
@@ -97,6 +106,19 @@ class Censor(nn.Module):
         # =====================================================================
         print("[Censor] Initializing TSFmicroFusion...")
         self.fusion = TSFmicroFusion(FUSION_CONFIG)
+
+        # =====================================================================
+        # Stage 4.5: Long-Term Memory Sparse Control (Multi-Stage)
+        # =====================================================================
+        print("[Censor] Initializing Sparse Control Wrapper...")
+        # Define sparse control points for all stages
+        self.sparse_control = SparseControlWrapper({
+            'fast_path': 512,          # FastPath output
+            'slow_path': 768,          # SlowPath output
+            'fusion': 1024,           # Fusion output
+            'moe_coarse': 3,          # MoE coarse experts (groups)
+            'moe_fine': 9,            # MoE fine experts (total)
+        })
 
         # =====================================================================
         # Stage 5: Dynamic AU Decoder
@@ -189,6 +211,19 @@ class Censor(nn.Module):
         slow_feat, slow_spatial = self.slow_pathway(rgb_rppg)
 
         # =====================================================================
+        # Stage 2.5: Sparse Control for Pathways
+        # =====================================================================
+        print(f"\n--- Stage 2.5: Sparse Control (Pathways) ---")
+        pathway_feats = {'fast_path': fast_feat, 'slow_path': slow_feat}
+        pathway_feats, pathway_stats = self.sparse_control(pathway_feats)
+        fast_feat = pathway_feats['fast_path']
+        slow_feat = pathway_feats['slow_path']
+        # Log stats for each pathway
+        for name, stats in pathway_stats.items():
+            if stats:
+                print(f"[Sparse-{name}] frozen={stats.get('frozen_ratio', 0):.3f}, usage={stats.get('usage_ratio', 0):.3f}")
+
+        # =====================================================================
         # Stage 3: Attention Modulation
         # =====================================================================
         print(f"\n--- Stage 3: Attention Modulation ---")
@@ -222,6 +257,21 @@ class Censor(nn.Module):
         print(f"\n--- Stage 4: TSFmicroFusion ---")
 
         fused_feat = self.fusion(fast_gated, slow_for_fusion)  # (B, 1024)
+
+        # =====================================================================
+        # Stage 4.5: Sparse Control for Fusion
+        # =====================================================================
+        print(f"\n--- Stage 4.5: Sparse Control ---")
+        # Apply sparse control to fusion output
+        fusion_feats, fusion_stats = self.sparse_control({'fusion': fused_feat})
+        fused_feat = fusion_feats['fusion']
+        fusion_stat = fusion_stats.get('fusion', {})
+        if fusion_stat:
+            print(f"[Sparse-fusion] frozen={fusion_stat.get('frozen_ratio', 0):.3f}, "
+                  f"usage={fusion_stat.get('usage_ratio', 0):.3f}")
+
+        # Collect all sparse stats
+        all_sparse_stats = {**pathway_stats, **fusion_stats}
 
         # =====================================================================
         # Stage 5: Dynamic AU Decoder
@@ -273,6 +323,7 @@ class Censor(nn.Module):
             'adapted_feat': adapted_feat,
             'template_report': template_reports,
             'llm_report': llm_reports,
+            'sparse_stats': all_sparse_stats,
         }
 
 

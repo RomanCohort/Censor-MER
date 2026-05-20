@@ -19,6 +19,8 @@ PREPROCESS_CONFIG = {
     'pyramid_levels': 4,
     'gaussian_sigma': 1.5,
     'center_bias_strength': 1.0,
+    # SaliencyDetectorE2E (new)
+    'sigma_ratio': 0.15,  # Relative sigma for resolution-independence
     # rPPGExtractor
     'rppg_window_size': 5,
     'rppg_bandpass_low': 0.5,   # Hz
@@ -27,6 +29,12 @@ PREPROCESS_CONFIG = {
     'tvl1_tau': 0.25,
     'tvl1_lambda': 0.15,
     'tvl1_theta': 0.3,
+    # AdaptiveOpticalFlow (new)
+    'fast_threshold': 0.1,  # Motion threshold for fast vs fine mode
+    'use_tvl1': True,     # Enable TV-L1 in fine mode
+    # AU Attention Config
+    'au_attention_size': 224,
+    'au_mask_threshold': 0.1,
 }
 
 # =============================================================================
@@ -116,7 +124,7 @@ MOE_CONFIG = {
     'hidden_dim': 512,
     'num_experts': 3,
     'gating_hidden_dim': 128,
-    'num_classes': 7,         # ME categories
+    'num_classes': 11,         # ME categories (11 after expansion)
     'top_k': 2,
     'load_balancing_lambda': 0.01,  # weight for auxiliary loss
 }
@@ -147,10 +155,31 @@ LLM_CONFIG = {
         24: "Lip Pressor", 25: "Lips Part", 26: "Jaw Drop",
         27: "Mouth Stretch", 28: "Lip Suck",
     },
+    # Extended ME categories (11 classes based on MER datasets)
+    # Combines: CASME II, SAMM, SMIC, MMEW annotations
     'me_categories': [
-        "Happiness", "Sadness", "Surprise", "Fear",
-        "Anger", "Disgust", "Contempt"
+        "Happiness (Duchenne)",      # 0: 真笑 AU6+AU12 (眼睛皱纹)
+        "Happiness (Non-Duchenne)", # 1: 假笑 AU12 only
+        "Surprise (Strong)",        # 2: 强烈惊讶
+        "Surprise (Weak)",         # 3: 轻微惊讶
+        "Fear",                  # 4: 恐惧
+        "Disgust (Strong)",      # 5: 强烈厌恶
+        "Disgust (Weak)",        # 6: 轻微厌恶
+        "Anger (Strong)",        # 7: 强烈愤怒
+        "Anger (Weak)",         # 8: 轻微愤怒
+        "Sadness",               # 9: 悲伤
+        "Contempt",              # 10: 蔑视 (单侧嘴角)
     ],
+    # Mapping from original 7-class to new 11-class
+    'me_mapping_7to11': {
+        0: [0, 1],        # Happiness → Duchenne / Non-Duchenne
+        2: [2, 3],        # Surprise → Strong / Weak
+        3: [4],          # Fear
+        5: [5, 6],      # Disgust → Strong / Weak
+        4: [7, 8],      # Anger → Strong / Weak
+        1: [9],          # Sadness
+        6: [10],         # Contempt
+    },
 }
 
 # =============================================================================
@@ -172,9 +201,106 @@ DATA_CONFIG = {
 DATA_ROOT = './data'  # default root directory for datasets
 
 # =============================================================================
+# Visual Perception Config
+# =============================================================================
+VISUAL_PERCEPTION_CONFIG = {
+    # PupilController
+    'pupil_hidden_dim': 64,
+    'pupil_base_gain': 0.8,
+    'pupil_modulation_range': 0.4,
+
+    # RetinalContrastNorm
+    'retinal_kernel': 9,
+    'retinal_alpha': 0.5,
+    'retinal_beta': 0.0,
+
+    # MachBandEnhancer
+    'mach_band_strength': 0.3,
+    'mach_band_sigma': 2.0,
+
+    # CenterSurroundReceptiveField
+    'center_sigma': 1.5,
+    'surround_sigma': 3.0,
+
+    # Options
+    'enable_retinal': True,
+    'enable_mach': True,
+    'receptive_weight': 0.1,
+}
+
+# =============================================================================
 # Weight Initialization Config
 # =============================================================================
 INIT_CONFIG = {
     'conv': 'kaiming_normal_',
     'linear': 'xavier_uniform_',
+}
+
+# =============================================================================
+# Long-Term Memory Sparse Control Config
+# =============================================================================
+SPARSE_CONTROL_CONFIG = {
+    'dim': 1024,                    # 神经元数量 (对应 fusion 输出)
+    'inactivity_threshold': 100,     # 软冻结阈值 (步) - 更激进
+    'hard_freeze_threshold': 200,     # 硬冻结阈值 (步) - 更激进
+    'soft_decay_factor': 0.9,         # 软衰减系数 - 更激进
+    'growth_factor_boost': 2.0,     # 恢复时增益 (2x)
+    'growth_recovery_steps': 30,          # 恢复所需步数
+    'min_activity_to_track': 0.01,   # 活跃度阈值
+    'enable_dual_path': True,         # 启用双路径
+    # 新增: 防过拟合增强
+    'enable_random_dropout': True,   # 随机Dropout混合
+    'random_dropout_rate': 0.15,     # 随机Dropout比例
+    'enable_l2': True,              # L2正则化
+    'l2_weight': 0.01,             # L2权重系数
+}
+
+# =============================================================================
+# Gaze-Driven AU Attention Config
+# =============================================================================
+GAZE_ATTENTION_CONFIG = {
+    # GazeEstimator
+    'gaze_input_dim': 64,           # Eye feature input dimension
+    'gaze_hidden_dim': 32,          # Hidden layer dimension
+
+    # AURegionAttention
+    'au_attention_size': 224,       # Spatial attention map size
+    'emotion_hint_dim': 11,         # ME categories for emotion hint
+    'region_sigma': 0.15,           # Gaussian spread for AU regions
+
+    # GazeDrivenAttention
+    'gaze_history_length': 5,       # Temporal smoothing history length
+    'output_attention_strength': 0.3,  # Feature modulation strength
+
+    # GazeEmotionCorrelation
+    'gaze_aversion_threshold': 0.5, # Threshold for deception detection
+}
+
+# =============================================================================
+# Ocular Motion Filter Config
+# =============================================================================
+OCULAR_FILTER_CONFIG = {
+    # BlinkDetector
+    'blink_au45_threshold': 0.5,    # AU45 activation threshold
+    'blink_min_duration': 3,        # Min blink frames (~15ms at 200fps)
+    'blink_max_duration': 80,       # Max blink frames (~400ms at 200fps)
+
+    # SaccadeDetector
+    'saccade_velocity_threshold': 0.5,  # Velocity threshold (normalized)
+    'saccade_max_duration': 20,     # Max saccade frames (~100ms)
+    'saccade_accel_threshold': 1.0, # Acceleration threshold
+    'velocity_smooth_kernel': 3,    # Velocity smoothing kernel size
+
+    # SmoothPursuitDetector
+    'pursuit_velocity_min': 0.1,    # Min pursuit velocity
+    'pursuit_velocity_max': 0.3,    # Max pursuit velocity
+    'pursuit_min_duration': 10,     # Min pursuit frames
+
+    # OcularMotionFilter
+    'combination_mode': 'union',    # Mask combination: 'union', 'blink_only', 'weighted'
+    'filter_strength': 0.8,         # Suppression strength (0-1)
+
+    # CleanSignalExtractor
+    'signal_smooth_window': 3,      # Temporal smoothing window
+    'baseline_frames': 3,           # Frames for baseline computation
 }

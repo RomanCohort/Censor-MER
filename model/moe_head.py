@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+import numpy as np
 from config.defaults import MOE_CONFIG, RADAR_CONFIG
 
 
@@ -317,3 +318,82 @@ class PersonalizedRadar(nn.Module):
 
         print(f"[PersonalizedRadar] Output: {adapted_query.shape}")
         return adapted_query
+
+
+# =============================================================================
+# PersonalizedRadarEnhanced -- Warmup LR for Better Adaptation
+# =============================================================================
+
+class PersonalizedRadarEnhanced(nn.Module):
+    """
+    PersonalizedRadar with warmup learning rate.
+
+    Improvements:
+      1. Warmup LR: gradually increase lr from 1e-5 to 1e-3
+      2. More stable early adaptation
+      3. Cosine decay schedule
+    """
+
+    def __init__(self, config=None):
+        super().__init__()
+        cfg = config or RADAR_CONFIG
+
+        self.input_dim = cfg['input_dim']
+        self.adapt_steps = cfg['adapt_steps']
+        self.base_lr = cfg['adapt_lr']
+        self.support_shots = cfg['support_shots']
+
+        # Residual adapter
+        self.adapter = nn.Linear(self.input_dim, self.input_dim, bias=False)
+        self._init_identity()
+
+    def _init_identity(self):
+        nn.init.eye_(self.adapter.weight)
+
+    def reset(self):
+        self._init_identity()
+
+    def _get_lr(self, step):
+        """Warmup + cosine decay LR schedule."""
+        warmup_steps = 2
+        if step < warmup_steps:
+            # Warmup: linear from 1e-5 to base_lr
+            return 1e-5 + (self.base_lr - 1e-5) * step / warmup_steps
+        else:
+            # Cosine decay
+            progress = (step - warmup_steps) / (self.adapt_steps - warmup_steps)
+            return self.base_lr * 0.5 * (1 + np.cos(np.pi * progress))
+
+    def adapt(self, support_feat, support_labels):
+        """Adapt with warmup LR schedule."""
+        mu = support_feat.mean(dim=0, keepdim=True)
+        diff_feat = support_feat - mu
+
+        for step in range(self.adapt_steps):
+            lr = self._get_lr(step)
+            optimizer = torch.optim.SGD(self.adapter.parameters(), lr=lr)
+
+            adapted = self.adapter(diff_feat)
+            loss = F.mse_loss(adapted, diff_feat)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            print(f"[PersonalizedRadarEnhanced] Step {step+1}, LR: {lr:.6f}, Loss: {loss.item():.6f}")
+
+    def forward(self, query_feat, support_feat=None, support_labels=None):
+        if support_feat is not None:
+            self.adapt(support_feat, support_labels)
+
+        adapted = self.adapter(query_feat)
+        return adapted + query_feat
+
+
+def PersonalizedRadarEnhanced_from_pretrained(model):
+    """Create PersonalizedRadarEnhanced from existing model."""
+    config = model.state_dict()
+    new_model = PersonalizedRadarEnhanced()
+    # Copy compatible weights
+    new_model.adapter.weight.data = model.adapter.weight.data.clone()
+    return new_model

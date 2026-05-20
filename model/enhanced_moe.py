@@ -53,10 +53,11 @@ class EnhancedMoE(nn.Module):
 
         # === Original MoE components ===
         input_dim = cfg['input_dim']
-        output_dim = cfg['num_classes']  # 7 ME categories
+        output_dim = cfg['num_classes']  # 11 ME categories
         num_experts = cfg['num_experts']
         expert_hidden = cfg['hidden_dim']  # 512
         self.top_k = cfg['top_k']
+        self.num_experts = num_experts  # Store as attribute
         self.noise_type = cfg.get('noise_type', 'correlated')
         self.noise_std = cfg.get('noise_std', 0.1)
 
@@ -165,10 +166,11 @@ class EnhancedMoE(nn.Module):
         output = (gate_probs.unsqueeze(-1) * expert_stack).sum(dim=1)
 
         # Load balancing - count primary expert selections
-        usage = torch.zeros(self.top_k, device=x.device)
+        usage = torch.zeros(self.num_experts, device=x.device)
         for idx in top_k_idx[:, 0]:
-            usage[idx.item()] += 1
-        usage = usage / usage.sum() * self.top_k  # Normalize
+            if idx.item() < self.num_experts:
+                usage[idx.item()] += 1
+        usage = usage / (usage.sum() + 1e-8)  # Normalize
 
         aux_loss = (usage - 1.0 / self.top_k).pow(2).sum() * 0.01
 

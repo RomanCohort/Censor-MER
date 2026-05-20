@@ -132,17 +132,23 @@ class EmotionReporter(nn.Module):
         Initialize DeepSeek API for LLM-based report generation.
         Falls back to OPT-125M if API is not available.
         """
-        # Try DeepSeek first
+        # Try DeepSeek first - check config, then environment
         api_key = None
         try:
             import os
-            # Check environment and config
-            api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY")
+            from config.defaults import LLM_CONFIG
+            # Priority: config > environment
+            api_key = LLM_CONFIG.get('deepseek_api_key') or \
+                     os.environ.get("DEEPSEEK_API_KEY") or \
+                     os.environ.get("OPENAI_API_KEY")
         except:
             pass
 
         if api_key:
-            self.deepseek = DeepSeekClient(api_key=api_key)
+            from config.defaults import LLM_CONFIG
+            model = LLM_CONFIG.get('deepseek_model', 'deepseek-chat')
+            base_url = LLM_CONFIG.get('deepseek_base_url', 'https://api.deepseek.com/v1')
+            self.deepseek = DeepSeekClient(api_key=api_key, model=model, base_url=base_url)
             self._llm_available = True
             print("[EmotionReporter] DeepSeek API initialized!")
             self._use_deepseek = True

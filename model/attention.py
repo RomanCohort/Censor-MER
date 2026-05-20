@@ -95,6 +95,81 @@ class Amygdala(nn.Module):
 
 
 # =============================================================================
+# AmygdalaWithPrior -- Face Region Prior for Stable Attention
+# =============================================================================
+
+class AmygdalaWithPrior(nn.Module):
+    """
+    Amygdala with face region prior for more stable attention.
+
+    Improvements:
+      1. Add face region prior (eye/nose/mouth regions)
+      2. Learnable prior strength
+      3. More stable gradient flow
+    """
+
+    def __init__(self, config=None):
+        super().__init__()
+        cfg = config or AMYGDALA_CONFIG
+
+        self.input_dim = cfg['input_dim']
+        self.hidden_dim = cfg['hidden_dim']
+        self.output_h, self.output_w = cfg['output_spatial']
+
+        # Feature compression
+        self.fc1 = nn.Linear(self.input_dim, self.hidden_dim)
+        self.relu = nn.ReLU(inplace=True)
+
+        output_neurons = self.output_h * self.output_w
+        self.fc2 = nn.Linear(self.hidden_dim, output_neurons)
+
+        # Learnable face region prior strength
+        self.prior_strength = nn.Parameter(torch.tensor(0.3))
+
+        # Build face region prior (fixed)
+        self.register_buffer('face_prior', self._create_face_prior())
+
+    def _create_face_prior(self):
+        """Create face region prior: higher weights for eye/nose/mouth regions."""
+        h, w = self.output_h, self.output_w
+        prior = torch.zeros(h, w)
+
+        # Eye region (top)
+        eye_h, eye_w = h // 4, w // 2
+        prior[h//6:h//3, w//4:3*w//4] = 1.0
+
+        # Nose region (center)
+        prior[h//3:h//2, w//3:2*w//3] = 1.0
+
+        # Mouth region (bottom)
+        prior[2*h//3:5*h//6, w//4:3*w//4] = 1.0
+
+        prior = prior / (prior.sum() + 1e-8)
+        return prior
+
+    def forward(self, fast_feat):
+        """
+        Args:
+            fast_feat (torch.Tensor): Fast pathway output, shape (B, 512)
+        Returns:
+            apm (torch.Tensor): Attention Prior Map, shape (B, 1, H, W)
+        """
+        # Feature compression
+        h = self.fc1(fast_feat)  # (B, 256)
+        h = self.relu(h)
+
+        # Spatial expansion
+        h = self.fc2(h)  # (B, H*W)
+        learned_map = torch.sigmoid(h.view(-1, 1, self.output_h, self.output_w))
+
+        # Combine with face prior
+        face_prior = self.face_prior.view(1, 1, self.output_h, self.output_w)
+        apm = (1 - self.prior_strength) * learned_map + self.prior_strength * face_prior
+
+        return apm
+
+
+# =============================================================================
 # FFA (Feature Fusion Attention) -- Mutual Pathway Recalibration
 # =============================================================================
 # Biological analogy: The Fusiform Face Area (FFA) integrates information
@@ -341,5 +416,103 @@ class CASANet(nn.Module):
 
         print(f"[CASANet] Output features: {attended.shape}")
         print(f"[CASANet] Apex scores: {apex_scores.shape}")
+
+        return attended, apex_scores
+
+
+# =============================================================================
+# CASANetLearnable -- Learnable Triangular Prior
+# =============================================================================
+
+class CASANetLearnable(nn.Module):
+    """
+    CASANet with learnable triangular prior.
+
+    Improvements:
+      1. Learnable triangular prior (nn.Parameter)
+      2. Proper gradient flow during training
+      3. Can adapt to different face sizes
+    """
+
+    def __init__(self, config=None):
+        super().__init__()
+        cfg = config or CASA_CONFIG
+
+        embed_dim = cfg['embed_dim']
+        num_heads = cfg['num_heads']
+        ffn_dim = cfg.get('ffn_dim', embed_dim * 4)
+        pyramid_h, pyramid_w = cfg['pyramid_size'][1], cfg['pyramid_size'][2]
+
+        # Learnable triangular prior as nn.Parameter
+        self.triangular_prior = nn.Parameter(torch.zeros(1, 1, pyramid_h, pyramid_w))
+
+        # Temporal attention for apex detection
+        self.temporal_attn = nn.MultiheadAttention(
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            batch_first=False,
+            dropout=0.1
+        )
+        self.temp_proj = nn.Linear(embed_dim, embed_dim)
+        self.temp_norm = nn.LayerNorm(embed_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(embed_dim, ffn_dim),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(ffn_dim, embed_dim),
+            nn.Dropout(0.1)
+        )
+        self.output_proj = nn.Conv3d(embed_dim, embed_dim, kernel_size=1)
+
+        # Initialize with triangle prior
+        self._init_triangular_prior(pyramid_h, pyramid_w)
+
+    def _init_triangular_prior(self, h, w):
+        """Initialize learnable prior with inverted triangle."""
+        with torch.no_grad():
+            cx, cy = w / 2, h / 2
+            for y in range(h):
+                for x in range(w):
+                    rel_y = (y - cy) / h
+                    rel_x = (x - cx) / w
+                    width = 0.3 * (1 - abs(rel_y) * 0.5)
+                    score = -((rel_x / (width + 0.01))**2 + (rel_y / 0.6)**2) / 0.1
+                    self.triangular_prior[0, 0, y, x] = score
+
+    def forward(self, x):
+        """
+        Args:
+            x (torch.Tensor): Slow pathway feature map, shape (B, C, T, H, W)
+        Returns:
+            attended (torch.Tensor): Attended features
+            apex_scores (torch.Tensor): Apex frame scores
+        """
+        B, C, T, H, W = x.shape
+
+        # Apply learnable spatial prior
+        spatial_weights = self.triangular_prior
+        if H != spatial_weights.shape[2] or W != spatial_weights.shape[3]:
+            spatial_weights = F.interpolate(
+                spatial_weights, size=(H, W), mode='bilinear', align_corners=False
+            )
+
+        attn_weights = F.softmax(spatial_weights.view(1, 1, -1), dim=2).view(1, 1, H, W)
+
+        # Apply spatial attention
+        spatial_attended = x * attn_weights.unsqueeze(2).expand(-1, -1, T, -1, -1) + x
+
+        # Temporal attention (similar to CASANet)
+        attended_perm = spatial_attended.permute(0, 3, 4, 2, 1)
+        attended_flat = attended_perm.reshape(B * H * W, T, C)
+        h_t = attended_flat.permute(1, 0, 2)
+
+        attn_out, _ = self.temporal_attn(h_t, h_t, h_t)
+        h_t = self.temp_norm(h_t + attn_out)
+        h_t = h_t + self.ffn(h_t)
+        h_t = h_t.permute(1, 0, 2)
+        temporal_attended = h_t.reshape(B, H, W, T, C).permute(0, 4, 3, 1, 2)
+
+        apex_scores = temporal_attended.mean(dim=[-1, -2, 1])
+        attended = self.output_proj(temporal_attended)
 
         return attended, apex_scores

@@ -80,9 +80,9 @@ class FrameSequenceDataset(Dataset):
         # Split into train/val
         self._split_dataset(val_ratio, seed)
 
-        # ImageNet normalization
-        self.mean = torch.tensor(DATA_CONFIG['normalize_mean']).view(3, 1, 1)
-        self.std = torch.tensor(DATA_CONFIG['normalize_std']).view(3, 1, 1)
+        # ImageNet normalization (shape: (C, 1, 1, 1) for broadcasting over (C, T, H, W))
+        self.mean = torch.tensor(DATA_CONFIG['normalize_mean']).view(3, 1, 1, 1)
+        self.std = torch.tensor(DATA_CONFIG['normalize_std']).view(3, 1, 1, 1)
 
     def _convert_excel_to_csv(self, data_root):
         """Convert CASME2 Excel to standard CSV format."""

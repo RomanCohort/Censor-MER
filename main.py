@@ -75,10 +75,11 @@ class Censor(nn.Module):
           -> EmotionReporter: Structured clinical reports
     """
 
-    def __init__(self, fast_preprocess=False, verbose=True):
+    def __init__(self, fast_preprocess=False, diff_mode=False, verbose=True):
         super().__init__()
 
         self.fast_preprocess = fast_preprocess
+        self.diff_mode = diff_mode
         self.verbose = verbose
 
         # =====================================================================
@@ -187,9 +188,27 @@ class Censor(nn.Module):
         # Apply saliency modulation: weighted input
         x_salient = x * (1.0 + 0.3 * saliency_map.expand(-1, C, -1, -1, -1))
 
-        # 1b) rPPG blood-flow heatmap
-        # Output: (B, 3, T, H, W) blood-flow signal
-        rppg_heatmap = self.rppg(x_salient)
+        # 1b) Lateral inhibition: onset-apex difference (replaces rPPG in diff_mode)
+        # In biology, retinal ganglion cells use lateral inhibition to enhance
+        # edges and suppress uniform regions. The onset-apex difference encodes
+        # the micro-expression change directly -- far more informative than rPPG
+        # for small datasets where rPPG estimation is unreliable.
+        if self.diff_mode:
+            # Onset frame (first frame = neutral baseline)
+            onset_frame = x_salient[:, :, 0:1, :, :]  # (B, C, 1, H, W)
+            # Apex frame (middle frame = peak expression)
+            apex_idx = T // 2
+            apex_frame = x_salient[:, :, apex_idx:apex_idx+1, :, :]  # (B, C, 1, H, W)
+            # Lateral inhibition: diff = apex - onset (per-pixel change)
+            onset_apex_diff = apex_frame - onset_frame  # (B, C, 1, H, W)
+            # Replicate across all T frames (same spatial diff, broadcast temporally)
+            onset_apex_diff = onset_apex_diff.expand(-1, -1, T, -1, -1)  # (B, C, T, H, W)
+            # Use diff as the "change signal" instead of rPPG
+            rppg_heatmap = onset_apex_diff
+            if self.verbose: print(f"[Censor] Diff mode: onset-apex diff shape: {rppg_heatmap.shape}")
+        else:
+            # Original: rPPG blood-flow heatmap
+            rppg_heatmap = self.rppg(x_salient)
 
         # 1c) Optical flow: TV-L1 (slow) or frame difference (fast)
         if self.fast_preprocess:

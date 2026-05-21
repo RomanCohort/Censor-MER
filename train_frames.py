@@ -506,6 +506,10 @@ def parse_args():
     parser.add_argument('--no_face_align', action='store_true',
                         help='Disable gaze stabilization reflex (face alignment)')
 
+    # Onset-Apex difference mode (lateral inhibition)
+    parser.add_argument('--diff_mode', action='store_true',
+                        help='Use onset-apex difference instead of rPPG (lateral inhibition)')
+
     # Backbone freezing (for small datasets)
     parser.add_argument('--freeze_backbone', action='store_true',
                         help='Freeze dual-pathway backbones (only train head)')
@@ -539,7 +543,7 @@ def train_single_fold(args, fold_idx, loso_subjects=None):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Model
-    model = Censor(fast_preprocess=True, verbose=False)
+    model = Censor(fast_preprocess=True, diff_mode=args.diff_mode, verbose=False)
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 

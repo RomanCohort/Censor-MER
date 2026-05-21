@@ -264,7 +264,7 @@ def run_training(args):
     print(f"Device: {device}")
 
     # Build model
-    model = Censor(fast_preprocess=True, verbose=False)
+    model = Censor(fast_preprocess=True, diff_mode=args.diff_mode, verbose=False)
 
     # Load pretrained weights for finetune
     if args.stage == 'finetune' and args.pretrained:

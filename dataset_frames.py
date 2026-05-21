@@ -276,9 +276,12 @@ class FrameSequenceDataset(Dataset):
         au_label = torch.zeros(28, dtype=torch.float32)
         au_str = str(sample.get('action_units', ''))
         if au_str and au_str != 'nan' and au_str != '':
-            # CASME2 AU format: "AU1+AU2+AU4" or "1+2+4"
+            # CASME2 AU format: "4+7+L10" or "12" or "4+7+L10+R12"
             for part in au_str.replace(' ', '').split('+'):
                 part = part.strip()
+                # Remove L/R prefix (left/right side indicator)
+                if part.startswith('L') or part.startswith('R'):
+                    part = part[1:]
                 if part.startswith('AU'):
                     part = part[2:]
                 try:

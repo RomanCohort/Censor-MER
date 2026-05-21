@@ -124,7 +124,7 @@ MOE_CONFIG = {
     'hidden_dim': 512,
     'num_experts': 3,
     'gating_hidden_dim': 128,
-    'num_classes': 8,          # CASME2 ME categories (8 classes: 0-7)
+    'num_classes': 5,          # CASME2 merged: happiness(0), surprise(1), disgust(2), repression(3), others(4)
     'top_k': 2,
     'load_balancing_lambda': 0.01,  # weight for auxiliary loss
 }

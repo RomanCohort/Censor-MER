@@ -36,7 +36,7 @@ from dataset_frames import FrameSequenceDataset, get_casme2_dataloaders
 # =============================================================================
 
 class SyntheticMERDataset(Dataset):
-    ME_CATEGORIES = ["Happiness", "Sadness", "Surprise", "Fear", "Anger", "Disgust", "Contempt"]
+    ME_CATEGORIES = ["Happiness", "Surprise", "Disgust", "Repression", "Others"]
 
     def __init__(self, num_samples=100, T=16, H=224, W=224):
         self.num_samples = num_samples
@@ -61,14 +61,30 @@ class SyntheticMERDataset(Dataset):
 # Loss Functions
 # =============================================================================
 
+class FocalLoss(nn.Module):
+    """Focal Loss for handling class imbalance."""
+    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
+        super().__init__()
+        self.gamma = gamma
+        self.reduction = reduction
+        self.alpha = alpha  # class weights
+
+    def forward(self, inputs, targets):
+        ce_loss = nn.functional.cross_entropy(inputs, targets, weight=self.alpha, reduction='none')
+        pt = torch.exp(-ce_loss)
+        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        return focal_loss.sum()
+
+
 def compute_me_loss(me_logits, me_labels):
-    # Class weights to handle CASME2 imbalance
-    # 0:happiness(32), 1:sadness(4), 2:surprise(28), 3:fear(2),
-    # 4:anger(0), 5:disgust(63), 6:contempt(0), 7:others(99)
-    freq = torch.tensor([32., 4., 28., 2., 1., 63., 1., 99.], device=me_logits.device)
+    # Focal Loss with class weights for CASME2 merged 5-class
+    # 0:happiness(32), 1:surprise(28), 2:disgust(63), 3:repression(27), 4:others(99)
+    freq = torch.tensor([32., 28., 63., 27., 99.], device=me_logits.device)
     weights = 1.0 / freq
-    weights = weights / weights.sum() * len(weights)  # normalize so avg weight = 1
-    return nn.CrossEntropyLoss(weight=weights)(me_logits, me_labels)
+    weights = weights / weights.sum() * len(weights)
+    return FocalLoss(alpha=weights, gamma=2.0)(me_logits, me_labels)
 
 
 def compute_au_loss(au_intensities, au_labels):
@@ -92,7 +108,7 @@ def compute_landmark_loss(au_intensities, au_labels):
 # =============================================================================
 
 class MetricsTracker:
-    ME_CATEGORIES = ["Happiness", "Sadness", "Surprise", "Fear", "Anger", "Disgust", "Contempt"]
+    ME_CATEGORIES = ["Happiness", "Surprise", "Disgust", "Repression", "Others"]
 
     def __init__(self):
         self.reset()
@@ -133,7 +149,7 @@ class MetricsTracker:
     @property
     def me_f1(self):
         f1_scores = []
-        for cls in range(7):
+        for cls in range(5):
             total = self.class_total.get(cls, 0)
             correct = self.class_correct.get(cls, 0)
             prec = correct / max(total, 1)
@@ -457,9 +473,9 @@ def parse_args():
     parser.add_argument('--W', type=int, default=224, help='Spatial width')
 
     # Training
-    parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--batch_size', type=int, default=4)
-    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--epochs', type=int, default=200)
+    parser.add_argument('--batch_size', type=int, default=8)
+    parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--max_grad_norm', type=float, default=5.0)
 

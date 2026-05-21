@@ -38,8 +38,7 @@ class FrameSequenceDataset(Dataset):
     """
 
     EMOTION_NAMES = [
-        'happiness', 'sadness', 'surprise', 'fear',
-        'anger', 'disgust', 'contempt', 'others'
+        'happiness', 'surprise', 'disgust', 'repression', 'others'
     ]
 
     def __init__(self, data_root, split='train', T=None, H=None, W=None,
@@ -95,8 +94,8 @@ class FrameSequenceDataset(Dataset):
                       'OffsetFrame', 'Unnamed6', 'ActionUnits', 'Emotion']
 
         emotion_map = {
-            'happiness': 0, 'sadness': 1, 'surprise': 2, 'fear': 3,
-            'anger': 4, 'disgust': 5, 'contempt': 6, 'others': 7, 'repression': 7,
+            'happiness': 0, 'surprise': 1, 'disgust': 2, 'repression': 3,
+            'sadness': 4, 'fear': 4, 'anger': 4, 'contempt': 4, 'others': 4,
         }
 
         samples = []
@@ -236,6 +235,33 @@ class FrameSequenceDataset(Dataset):
             mean = frames_tensor.mean(dim=(2, 3), keepdim=True)
             frames_tensor = (frames_tensor - mean) * c + mean
             frames_tensor = frames_tensor.clamp(0, 1)
+
+        # Stronger color jitter: saturation and hue
+        if random.random() < 0.2:
+            # Convert to grayscale and mix
+            gray = frames_tensor.mean(dim=0, keepdim=True).expand_as(frames_tensor)
+            alpha = random.uniform(0.5, 1.0)
+            frames_tensor = alpha * frames_tensor + (1 - alpha) * gray
+
+        # Random temporal crop (stronger jitter)
+        if random.random() < 0.3:
+            T = frames_tensor.shape[1]
+            if T > 4:
+                crop_len = random.randint(T // 2, T)
+                start = random.randint(0, T - crop_len)
+                cropped = frames_tensor[:, start:start + crop_len, :, :]
+                # Resize back to T frames
+                indices = torch.linspace(0, crop_len - 1, T).long()
+                frames_tensor = cropped[:, indices, :, :]
+
+        # Random erasing (simulate occlusion)
+        if random.random() < 0.15:
+            C, T, H, W = frames_tensor.shape
+            eh = random.randint(H // 8, H // 4)
+            ew = random.randint(W // 8, W // 4)
+            eh_start = random.randint(0, H - eh)
+            ew_start = random.randint(0, W - ew)
+            frames_tensor[:, :, eh_start:eh_start + eh, ew_start:ew_start + ew] = 0
 
         return frames_tensor
 

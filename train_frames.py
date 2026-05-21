@@ -66,8 +66,10 @@ def compute_me_loss(me_logits, me_labels):
 
 
 def compute_au_loss(au_intensities, au_labels):
-    au_mean = au_intensities.mean(dim=1)  # (B, 28)
-    return nn.BCELoss()(au_mean, au_labels)
+    au_mean = au_intensities.mean(dim=1).float()  # (B, 28) - force fp32 for AMP safety
+    au_labels = au_labels.float()
+    with torch.cuda.amp.autocast(enabled=False):
+        return nn.BCELoss()(au_mean, au_labels)
 
 
 def compute_landmark_loss(au_intensities, au_labels):

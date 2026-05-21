@@ -2,6 +2,7 @@
 Censor -- Frame Sequence Dataset Loader
 
 Supports loading micro-expression samples from preprocessed frame sequences.
+Includes gaze stabilization reflex (face alignment) and LOSO cross-validation.
 """
 
 import os
@@ -14,6 +15,178 @@ import pandas as pd
 from pathlib import Path
 
 from config.defaults import DATA_CONFIG
+
+
+# =============================================================================
+# Gaze Stabilization Reflex -- Face Alignment
+# =============================================================================
+# In biology, the vestibulo-ocular reflex stabilizes gaze during head movement.
+# Analogously, face alignment stabilizes the facial coordinate frame across
+# subjects, reducing inter-subject variation so the model focuses on
+# expression dynamics rather than identity.
+
+# Canonical eye positions for 224x224 alignment target
+# Based on average face proportions: eyes at ~30% from top, ~30%/70% horizontal
+REFERENCE_LANDMARKS = np.array([
+    [0.315, 0.36],   # Left eye center
+    [0.685, 0.36],   # Right eye center
+], dtype=np.float32)
+
+
+def _detect_eye_centers(frame):
+    """
+    Detect eye centers using mediapipe Face Mesh.
+
+    Args:
+        frame: (H, W, 3) RGB uint8
+
+    Returns:
+        eye_centers: (2, 2) [left_eye, right_eye] normalized coords, or None
+    """
+    try:
+        import mediapipe as mp
+        mp_face_mesh = mp.solutions.face_mesh
+        with mp_face_mesh.FaceMesh(
+            static_image_mode=True,
+            max_num_faces=1,
+            refine_landmarks=False,
+            min_detection_confidence=0.3,
+        ) as face_mesh:
+            results = face_mesh.process(frame)
+            if not results.multi_face_landmarks:
+                return None
+            landmarks = results.multi_face_landmarks[0]
+            h, w = frame.shape[:2]
+
+            # Left eye: landmark 33 (inner) and 133 (outer) -> center
+            left_x = (landmarks.landmark[33].x + landmarks.landmark[133].x) / 2
+            left_y = (landmarks.landmark[33].y + landmarks.landmark[133].y) / 2
+            # Right eye: landmark 362 (inner) and 263 (outer) -> center
+            right_x = (landmarks.landmark[362].x + landmarks.landmark[263].x) / 2
+            right_y = (landmarks.landmark[362].y + landmarks.landmark[263].y) / 2
+
+            return np.array([
+                [left_x, left_y],
+                [right_x, right_y],
+            ], dtype=np.float32)
+    except ImportError:
+        return None
+    except Exception:
+        return None
+
+
+def _compute_alignment_transform(src_points, dst_points):
+    """
+    Compute similarity transform (rotation + scale + translation) to align
+    src_points to dst_points using least-squares.
+
+    Args:
+        src_points: (N, 2) source points
+        dst_points: (N, 2) destination points
+
+    Returns:
+        M: (2, 3) affine transformation matrix
+    """
+    return cv2.estimateAffinePartial2D(src_points, dst_points)[0]
+
+
+def align_face(frame, target_size=(224, 224)):
+    """
+    Align a face frame using gaze stabilization reflex.
+
+    Detects eye positions and applies a similarity transform to warp the face
+    into a canonical coordinate frame. This mimics the vestibulo-ocular reflex
+    that stabilizes retinal images during head movement.
+
+    Args:
+        frame: (H, W, 3) RGB uint8
+        target_size: (W, H) output size
+
+    Returns:
+        aligned: (H, W, 3) RGB uint8, aligned face
+    """
+    h, w = frame.shape[:2]
+    eye_centers = _detect_eye_centers(frame)
+
+    if eye_centers is None:
+        # Fallback: no alignment possible, just resize
+        return cv2.resize(frame, target_size)
+
+    # Scale reference landmarks to target pixel coordinates
+    dst_pixels = REFERENCE_LANDMARKS.copy()
+    dst_pixels[:, 0] *= target_size[0]  # x * W
+    dst_pixels[:, 1] *= target_size[1]  # y * H
+
+    # Source eye centers in pixel coordinates
+    src_pixels = eye_centers.copy()
+    src_pixels[:, 0] *= w
+    src_pixels[:, 1] *= h
+
+    # Compute similarity transform
+    M = _compute_alignment_transform(src_pixels, dst_pixels)
+
+    if M is None:
+        return cv2.resize(frame, target_size)
+
+    # Apply warp
+    aligned = cv2.warpAffine(
+        frame, M, target_size,
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
+    return aligned
+
+
+def align_face_sequence(frames, target_size=(224, 224)):
+    """
+    Align a sequence of face frames using the first frame's eye positions.
+
+    Using the first frame's transform for the entire sequence ensures temporal
+    consistency -- analogous to how the vestibulo-ocular reflex maintains a
+    stable gaze reference across rapid micro-expression changes.
+
+    Args:
+        frames: (T, H, W, 3) RGB uint8
+        target_size: (W, H) output size
+
+    Returns:
+        aligned: (T, H, W, 3) RGB uint8
+    """
+    if len(frames) == 0:
+        return frames
+
+    h, w = frames.shape[1], frames.shape[2]
+    eye_centers = _detect_eye_centers(frames[0])
+
+    if eye_centers is None:
+        # No alignment possible, just resize all
+        return np.stack([cv2.resize(f, target_size) for f in frames], axis=0)
+
+    # Compute transform from first frame
+    dst_pixels = REFERENCE_LANDMARKS.copy()
+    dst_pixels[:, 0] *= target_size[0]
+    dst_pixels[:, 1] *= target_size[1]
+
+    src_pixels = eye_centers.copy()
+    src_pixels[:, 0] *= w
+    src_pixels[:, 1] *= h
+
+    M = _compute_alignment_transform(src_pixels, dst_pixels)
+
+    if M is None:
+        return np.stack([cv2.resize(f, target_size) for f in frames], axis=0)
+
+    # Apply same transform to all frames (temporal consistency)
+    aligned = []
+    for frame in frames:
+        warped = cv2.warpAffine(
+            frame, M, target_size,
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REPLICATE,
+        )
+        aligned.append(warped)
+
+    return np.stack(aligned, axis=0)
 
 
 class FrameSequenceDataset(Dataset):
@@ -42,7 +215,8 @@ class FrameSequenceDataset(Dataset):
     ]
 
     def __init__(self, data_root, split='train', T=None, H=None, W=None,
-                 augment=None, temporal_jitter=None, val_ratio=0.2, seed=42):
+                 augment=None, temporal_jitter=None, val_ratio=0.2, seed=42,
+                 face_align=True, loso_fold=None, loso_subjects=None):
         """
         Args:
             data_root (str): Root directory of CASME2 data
@@ -52,8 +226,12 @@ class FrameSequenceDataset(Dataset):
             W (int): Target width (default from config)
             augment (bool): Apply data augmentation
             temporal_jitter (bool): Random temporal sampling during training
-            val_ratio (float): Validation split ratio
+            val_ratio (float): Validation split ratio (ignored if loso_fold set)
             seed (int): Random seed for splitting
+            face_align (bool): Apply gaze stabilization reflex (face alignment)
+            loso_fold (int): LOSO fold index (0-based). If set, uses
+                Leave-One-Subject-Out: fold-th subject is val, rest are train.
+            loso_subjects (list): Override subject list for LOSO
         """
         self.data_root = data_root
         self.split = split
@@ -62,6 +240,7 @@ class FrameSequenceDataset(Dataset):
         self.W = W or DATA_CONFIG['W']
         self.augment = augment if augment is not None else DATA_CONFIG['augment']
         self.temporal_jitter = temporal_jitter if temporal_jitter is not None else DATA_CONFIG['temporal_jitter']
+        self.face_align = face_align
 
         self.cropped_dir = os.path.join(data_root, 'cropped')
 
@@ -77,7 +256,10 @@ class FrameSequenceDataset(Dataset):
         print(f"[FrameSequenceDataset] Loaded {len(self.samples)} samples from {labels_path}")
 
         # Split into train/val
-        self._split_dataset(val_ratio, seed)
+        if loso_fold is not None:
+            self._split_loso(loso_fold, loso_subjects)
+        else:
+            self._split_dataset(val_ratio, seed)
 
         # ImageNet normalization (shape: (C, 1, 1, 1) for broadcasting over (C, T, H, W))
         self.mean = torch.tensor(DATA_CONFIG['normalize_mean']).view(3, 1, 1, 1)
@@ -108,7 +290,7 @@ class FrameSequenceDataset(Dataset):
                 continue
 
             emotion = str(row['Emotion']).strip().lower() if pd.notna(row['Emotion']) else 'others'
-            me_label = emotion_map.get(emotion, 7)
+            me_label = emotion_map.get(emotion, 4)
 
             frame_files = sorted([f for f in os.listdir(frame_dir) if f.endswith('.jpg')])
             num_frames = len(frame_files)
@@ -119,6 +301,9 @@ class FrameSequenceDataset(Dataset):
                 'filename': filename,
                 'me_label': me_label,
                 'emotion': emotion,
+                'onset': int(row['OnsetFrame']) if pd.notna(row['OnsetFrame']) else 0,
+                'apex': int(row['ApexFrame']) if pd.notna(row['ApexFrame']) else 0,
+                'offset': int(row['OffsetFrame']) if pd.notna(row['OffsetFrame']) else 0,
                 'num_frames': num_frames,
                 'action_units': str(row['ActionUnits']) if pd.notna(row['ActionUnits']) else '',
             })
@@ -139,6 +324,38 @@ class FrameSequenceDataset(Dataset):
             self.samples = self.samples[self.samples['subject'].isin(val_subjects)]
 
         print(f"[FrameSequenceDataset] {self.split}: {len(self.samples)} samples")
+
+    def _split_loso(self, fold, loso_subjects=None):
+        """
+        Leave-One-Subject-Out (LOSO) split.
+
+        In MER, LOSO is the standard evaluation protocol: train on all subjects
+        except one, test on the held-out subject. This tests generalization to
+        unseen identities -- critical for real-world deployment.
+
+        Args:
+            fold (int): Fold index (0-based). The fold-th subject is held out.
+            loso_subjects (list): Override subject list
+        """
+        if loso_subjects is not None:
+            subjects = sorted(loso_subjects)
+        else:
+            subjects = sorted(self.samples['subject'].unique())
+
+        if fold >= len(subjects):
+            raise ValueError(f"LOSO fold {fold} >= {len(subjects)} subjects")
+
+        val_subject = subjects[fold]
+        print(f"[FrameSequenceDataset] LOSO fold {fold}/{len(subjects)}: "
+              f"val_subject={val_subject}")
+
+        if self.split == 'train':
+            self.samples = self.samples[self.samples['subject'] != val_subject]
+        else:
+            self.samples = self.samples[self.samples['subject'] == val_subject]
+
+        print(f"[FrameSequenceDataset] {self.split}: {len(self.samples)} samples "
+              f"(subject {val_subject})")
 
     def __len__(self):
         return len(self.samples)
@@ -176,12 +393,19 @@ class FrameSequenceDataset(Dataset):
 
         return np.stack(frames, axis=0)  # (T_orig, H, W, 3)
 
-    def _sample_frames(self, frames):
+    def _sample_frames(self, frames, onset=0, apex=0, offset=0):
         """
-        Sample T frames from the sequence.
+        Sample T frames with apex-centered strategy (retinal adaptation).
+
+        The retina adapts to baseline (onset) and is most sensitive at the
+        peak change (apex). This sampling emphasizes the onset→apex transition
+        where micro-expression information is concentrated.
 
         Args:
             frames (np.ndarray): (T_orig, H, W, 3)
+            onset (int): Onset frame index (1-based in CASME2)
+            apex (int): Apex frame index (1-based in CASME2)
+            offset (int): Offset frame index (1-based in CASME2)
 
         Returns:
             sampled (np.ndarray): (T, H, W, 3)
@@ -190,17 +414,64 @@ class FrameSequenceDataset(Dataset):
         T = self.T
 
         if total <= T:
-            # Repeat frames if too short
             indices = np.arange(T) % total
-        elif self.split == 'train' and self.temporal_jitter:
-            # Random temporal segment
-            max_start = total - T
-            start = random.randint(0, max_start)
-            indices = np.arange(start, start + T)
-        else:
-            # Even sampling
-            indices = np.linspace(0, total - 1, T).astype(int)
+            return frames[indices]
 
+        # Convert 1-based CASME2 frame indices to 0-based
+        onset_idx = max(0, onset - 1) if onset > 0 else 0
+        apex_idx = min(total - 1, apex - 1) if apex > 0 else total // 2
+        offset_idx = min(total - 1, offset - 1) if offset > 0 else total - 1
+
+        # Ensure valid range
+        if apex_idx <= onset_idx:
+            apex_idx = min(onset_idx + total // 4, total - 1)
+        if offset_idx <= apex_idx:
+            offset_idx = min(apex_idx + total // 4, total - 1)
+
+        if self.split == 'train' and self.temporal_jitter:
+            # Training: random window centered around apex
+            # Sample more frames from onset→apex (the informative part)
+            half_T = T // 2
+
+            # First half: onset→apex transition (most important)
+            onset_apex_len = apex_idx - onset_idx
+            if onset_apex_len >= half_T:
+                # Evenly sample from onset to apex
+                first_indices = np.linspace(onset_idx, apex_idx, half_T).astype(int)
+            else:
+                # Not enough frames, pad from before onset
+                start = max(0, apex_idx - half_T)
+                first_indices = np.linspace(start, apex_idx, half_T).astype(int)
+
+            # Second half: apex→offset or after apex
+            remaining = T - half_T
+            after_apex = total - apex_idx - 1
+            if after_apex >= remaining:
+                second_indices = np.linspace(apex_idx, min(apex_idx + after_apex, total - 1), remaining).astype(int)
+            else:
+                second_indices = np.linspace(apex_idx, total - 1, remaining).astype(int)
+
+            indices = np.concatenate([first_indices, second_indices])
+        else:
+            # Validation: deterministic apex-centered sampling
+            # Distribute frames: 40% before apex, 20% at apex, 40% after apex
+            n_before = int(T * 0.4)
+            n_apex = max(1, T - 2 * n_before)
+            n_after = T - n_before - n_apex
+
+            before_indices = np.linspace(onset_idx, apex_idx, n_before + 1).astype(int)[:n_before]
+            apex_indices = np.full(n_apex, apex_idx, dtype=int)
+            after_indices = np.linspace(apex_idx, offset_idx, n_after + 1).astype(int)[1:n_after + 1]
+
+            indices = np.concatenate([before_indices, apex_indices, after_indices])
+
+        # Ensure we have exactly T indices
+        if len(indices) < T:
+            indices = np.concatenate([indices, np.full(T - len(indices), indices[-1], dtype=int)])
+        elif len(indices) > T:
+            indices = indices[:T]
+
+        indices = np.clip(indices, 0, total - 1)
         return frames[indices]
 
     def _resize_frames(self, frames):
@@ -209,6 +480,27 @@ class FrameSequenceDataset(Dataset):
         for frame in frames:
             resized.append(cv2.resize(frame, (self.W, self.H)))
         return np.stack(resized, axis=0)
+
+    def _align_frames(self, frames):
+        """
+        Apply gaze stabilization reflex (face alignment) to frame sequence.
+
+        Uses the first frame's eye positions to compute a similarity transform,
+        then applies it to all frames for temporal consistency. This is
+        analogous to the vestibulo-ocular reflex stabilizing retinal images.
+
+        Args:
+            frames: (T_orig, H, W, 3) RGB uint8
+
+        Returns:
+            aligned: (T_orig, H, W, 3) RGB uint8, aligned and resized
+        """
+        if not self.face_align:
+            return self._resize_frames(frames)
+
+        # Align using first frame's landmarks, output at target resolution
+        aligned = align_face_sequence(frames, target_size=(self.W, self.H))
+        return aligned
 
     def _augment_frames(self, frames_tensor):
         """
@@ -279,11 +571,16 @@ class FrameSequenceDataset(Dataset):
         # Load frames
         frames = self._load_frames(sample['video_path'])  # (T_orig, H, W, 3)
 
-        # Sample T frames
-        frames = self._sample_frames(frames)  # (T, H_orig, W_orig, 3)
+        # Get onset/apex/offset for apex-centered sampling
+        onset = int(sample.get('onset', 0)) if pd.notna(sample.get('onset', 0)) else 0
+        apex = int(sample.get('apex', 0)) if pd.notna(sample.get('apex', 0)) else 0
+        offset = int(sample.get('offset', 0)) if pd.notna(sample.get('offset', 0)) else 0
 
-        # Resize
-        frames = self._resize_frames(frames)  # (T, H, W, 3)
+        # Sample T frames with apex-centered strategy
+        frames = self._sample_frames(frames, onset=onset, apex=apex, offset=offset)
+
+        # Align (gaze stabilization reflex) + resize
+        frames = self._align_frames(frames)  # (T, H, W, 3)
 
         # Convert to tensor: (T, H, W, C) -> (C, T, H, W)
         frames_tensor = torch.from_numpy(frames).float() / 255.0  # [0, 1]
@@ -321,7 +618,8 @@ class FrameSequenceDataset(Dataset):
 
 
 def get_casme2_dataloaders(data_root, batch_size=8, T=16, H=224, W=224,
-                           num_workers=4, val_ratio=0.2, seed=42):
+                           num_workers=4, val_ratio=0.2, seed=42,
+                           face_align=True, loso_fold=None):
     """
     Create train and validation dataloaders for CASME2.
 
@@ -331,8 +629,10 @@ def get_casme2_dataloaders(data_root, batch_size=8, T=16, H=224, W=224,
         T (int): Number of frames
         H, W (int): Spatial resolution
         num_workers (int): DataLoader workers
-        val_ratio (float): Validation ratio
+        val_ratio (float): Validation ratio (ignored if loso_fold set)
         seed (int): Random seed
+        face_align (bool): Apply gaze stabilization reflex (face alignment)
+        loso_fold (int): LOSO fold index. If set, uses Leave-One-Subject-Out.
 
     Returns:
         train_loader, val_loader
@@ -347,6 +647,8 @@ def get_casme2_dataloaders(data_root, batch_size=8, T=16, H=224, W=224,
         temporal_jitter=True,
         val_ratio=val_ratio,
         seed=seed,
+        face_align=face_align,
+        loso_fold=loso_fold,
     )
 
     val_dataset = FrameSequenceDataset(
@@ -357,6 +659,8 @@ def get_casme2_dataloaders(data_root, batch_size=8, T=16, H=224, W=224,
         temporal_jitter=False,
         val_ratio=val_ratio,
         seed=seed,
+        face_align=face_align,
+        loso_fold=loso_fold,
     )
 
     train_loader = DataLoader(
@@ -377,6 +681,20 @@ def get_casme2_dataloaders(data_root, batch_size=8, T=16, H=224, W=224,
     )
 
     return train_loader, val_loader
+
+
+def get_loso_subjects(data_root):
+    """
+    Get sorted list of subjects for LOSO cross-validation.
+
+    Returns:
+        subjects: sorted list of subject IDs
+    """
+    labels_path = os.path.join(data_root, 'labels.csv')
+    if not os.path.exists(labels_path):
+        return None
+    samples = pd.read_csv(labels_path)
+    return sorted(samples['subject'].unique())
 
 
 if __name__ == '__main__':

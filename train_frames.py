@@ -473,9 +473,9 @@ def parse_args():
     parser.add_argument('--W', type=int, default=224, help='Spatial width')
 
     # Training
-    parser.add_argument('--epochs', type=int, default=200)
+    parser.add_argument('--epochs', type=int, default=150)
     parser.add_argument('--batch_size', type=int, default=8)
-    parser.add_argument('--lr', type=float, default=3e-4)
+    parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--max_grad_norm', type=float, default=5.0)
 
@@ -492,6 +492,16 @@ def parse_args():
     parser.add_argument('--num_workers', type=int, default=2)
     parser.add_argument('--seed', type=int, default=42)
 
+    # Face alignment
+    parser.add_argument('--no_face_align', action='store_true',
+                        help='Disable gaze stabilization reflex (face alignment)')
+
+    # LOSO cross-validation
+    parser.add_argument('--loso', action='store_true',
+                        help='Enable Leave-One-Subject-Out cross-validation')
+    parser.add_argument('--loso_fold', type=int, default=None,
+                        help='Run specific LOSO fold (0-based). If not set with --loso, runs all folds.')
+
     # Resume
     parser.add_argument('--resume', type=str, default=None,
                         help='Path to checkpoint to resume from')
@@ -507,6 +517,67 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
+def train_single_fold(args, fold_idx, loso_subjects=None):
+    """Train a single LOSO fold or standard train/val split."""
+    set_seed(args.seed)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # Model
+    model = Censor(fast_preprocess=True, verbose=False)
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    fold_label = f"fold_{fold_idx}" if fold_idx is not None else "standard"
+    output_dir = os.path.join(args.output_dir, fold_label)
+
+    print(f"\n{'='*60}")
+    print(f" Training: {fold_label}")
+    print(f" Parameters: {total_params:,} total, {trainable_params:,} trainable")
+    print(f"{'='*60}")
+
+    # Data
+    face_align = not args.no_face_align
+    loso_fold = fold_idx if args.loso else None
+
+    train_loader, val_loader = get_casme2_dataloaders(
+        data_root=args.data_root,
+        batch_size=args.batch_size,
+        T=args.T, H=args.H, W=args.W,
+        num_workers=args.num_workers,
+        face_align=face_align,
+        loso_fold=loso_fold,
+    )
+
+    print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
+
+    # Override output_dir for this fold
+    fold_args = argparse.Namespace(**vars(args))
+    fold_args.output_dir = output_dir
+
+    # Trainer
+    trainer = Trainer(model, device, fold_args)
+
+    if args.resume:
+        ckpt = torch.load(args.resume, map_location=device)
+        model.load_state_dict(ckpt['model_state_dict'])
+        trainer.optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+        trainer.scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+        print(f"Resumed from epoch {ckpt['epoch']}")
+
+    # Train
+    trainer.train(train_loader, val_loader, fold_args)
+
+    # Return best accuracy
+    best_path = os.path.join(output_dir, 'best_model.pth')
+    if os.path.exists(best_path):
+        ckpt = torch.load(best_path, map_location='cpu')
+        best_acc = ckpt['metrics']['me_accuracy']
+        best_f1 = ckpt['metrics']['me_f1']
+        print(f"\n[{fold_label}] Best Val Acc: {best_acc:.4f}, F1: {best_f1:.4f}")
+        return best_acc, best_f1
+    return 0.0, 0.0
+
+
 if __name__ == '__main__':
     args = parse_args()
     set_seed(args.seed)
@@ -518,46 +589,78 @@ if __name__ == '__main__':
         print(f"GPU: {torch.cuda.get_device_name(0)}")
         print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
     print(f"Random seed: {args.seed}")
+    print(f"Face alignment: {'disabled' if args.no_face_align else 'enabled (gaze stabilization reflex)'}")
+    print(f"LOSO: {'enabled' if args.loso else 'disabled (random split)'}")
 
-    # Model
-    print("\nBuilding Censor model...")
-    model = Censor(fast_preprocess=True, verbose=False)
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Total parameters: {total_params:,}")
-    print(f"Trainable parameters: {trainable_params:,}")
-
-    # Data
     if args.synthetic_data:
+        # Synthetic data test
         print("\nUsing synthetic data for testing...")
+        model = Censor(fast_preprocess=True, verbose=False)
         train_dataset = SyntheticMERDataset(num_samples=100, T=args.T, H=args.H, W=args.W)
         val_dataset = SyntheticMERDataset(num_samples=20, T=args.T, H=args.H, W=args.W)
         train_loader = DataLoader(train_dataset, batch_size=args.batch_size,
                                   shuffle=True, num_workers=0, drop_last=True)
         val_loader = DataLoader(val_dataset, batch_size=args.batch_size,
                                 shuffle=False, num_workers=0)
+
+        trainer = Trainer(model, device, args)
+        trainer.train(train_loader, val_loader, args)
+
+    elif args.loso:
+        # LOSO cross-validation
+        from dataset_frames import get_loso_subjects
+
+        subjects = get_loso_subjects(args.data_root)
+        if subjects is None:
+            print("[Error] Cannot get subjects. Make sure labels.csv exists.")
+            exit(1)
+
+        num_folds = len(subjects)
+        print(f"\nLOSO: {num_folds} subjects = {num_folds} folds")
+        print(f"Subjects: {subjects}")
+
+        # Determine which folds to run
+        if args.loso_fold is not None:
+            folds_to_run = [args.loso_fold]
+        else:
+            folds_to_run = list(range(num_folds))
+
+        fold_results = {}
+        for fold_idx in folds_to_run:
+            acc, f1 = train_single_fold(args, fold_idx, loso_subjects=subjects)
+            fold_results[fold_idx] = {'acc': acc, 'f1': f1, 'subject': subjects[fold_idx]}
+
+        # Print LOSO summary
+        print(f"\n{'='*60}")
+        print(f" LOSO Cross-Validation Summary")
+        print(f"{'='*60}")
+        accs = []
+        f1s = []
+        for fold_idx, res in sorted(fold_results.items()):
+            print(f"  Fold {fold_idx} ({res['subject']}): Acc={res['acc']:.4f}, F1={res['f1']:.4f}")
+            accs.append(res['acc'])
+            f1s.append(res['f1'])
+
+        print(f"\n  Mean Acc: {np.mean(accs):.4f} +/- {np.std(accs):.4f}")
+        print(f"  Mean F1:  {np.mean(f1s):.4f} +/- {np.std(f1s):.4f}")
+        print(f"{'='*60}")
+
+        # Save LOSO summary
+        summary_path = os.path.join(args.output_dir, 'loso_summary.csv')
+        os.makedirs(args.output_dir, exist_ok=True)
+        with open(summary_path, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=['fold', 'subject', 'accuracy', 'f1'])
+            writer.writeheader()
+            for fold_idx, res in sorted(fold_results.items()):
+                writer.writerow({
+                    'fold': fold_idx,
+                    'subject': res['subject'],
+                    'accuracy': res['acc'],
+                    'f1': res['f1'],
+                })
+        print(f"LOSO summary saved to: {summary_path}")
+
     else:
-        print(f"\nLoading CASME2 frame sequences from: {args.data_root}")
-        train_loader, val_loader = get_casme2_dataloaders(
-            data_root=args.data_root,
-            batch_size=args.batch_size,
-            T=args.T, H=args.H, W=args.W,
-            num_workers=args.num_workers,
-        )
-
-    print(f"Train batches: {len(train_loader)}")
-    print(f"Val batches: {len(val_loader)}")
-
-    # Resume
-    trainer = Trainer(model, device, args)
-    if args.resume:
-        print(f"\nResuming from checkpoint: {args.resume}")
-        ckpt = torch.load(args.resume, map_location=device)
-        model.load_state_dict(ckpt['model_state_dict'])
-        trainer.optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-        trainer.scheduler.load_state_dict(ckpt['scheduler_state_dict'])
-        print(f"Resumed from epoch {ckpt['epoch']}")
-
-    # Train
-    print(f"\nStarting training: {args.epochs} epochs, batch_size={args.batch_size}, lr={args.lr}")
-    trainer.train(train_loader, val_loader, args)
+        # Standard train/val split
+        acc, f1 = train_single_fold(args, fold_idx=None)
+        print(f"\nFinal: Acc={acc:.4f}, F1={f1:.4f}")

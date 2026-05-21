@@ -78,6 +78,61 @@ class FocalLoss(nn.Module):
         return focal_loss.sum()
 
 
+class SupConLoss(nn.Module):
+    """Supervised Contrastive Loss (Khosla et al., 2020).
+
+    Pulls features of same-class samples together, pushes different-class apart.
+    Particularly effective for small datasets where class boundaries are unclear.
+    """
+    def __init__(self, temperature=0.07):
+        super().__init__()
+        self.temperature = temperature
+
+    def forward(self, features, labels):
+        """
+        Args:
+            features: (B, D) normalized feature vectors
+            labels: (B,) class labels
+        """
+        device = features.device
+        B = features.shape[0]
+        if B < 2:
+            return torch.tensor(0.0, device=device)
+
+        # Normalize features
+        features = nn.functional.normalize(features, dim=1)
+
+        # Similarity matrix: (B, B)
+        sim = torch.matmul(features, features.T) / self.temperature
+
+        # Mask: same-class pairs (positive pairs)
+        labels = labels.view(-1, 1)
+        mask = (labels == labels.T).float()  # (B, B)
+
+        # Remove self-similarity from positive mask
+        logits_mask = torch.ones_like(mask) - torch.eye(B, device=device)
+        mask = mask * logits_mask
+
+        # For numerical stability
+        logits_max, _ = sim.max(dim=1, keepdim=True)
+        sim = sim - logits_max.detach()
+
+        # Log-sum-exp over all negatives + positives (denominator)
+        exp_sim = torch.exp(sim) * logits_mask
+        log_prob = sim - torch.log(exp_sim.sum(dim=1, keepdim=True) + 1e-8)
+
+        # Mean log-likelihood over positive pairs
+        pos_per_sample = mask.sum(dim=1)
+        # Only compute for samples with at least one positive pair
+        has_pos = pos_per_sample > 0
+        if has_pos.sum() == 0:
+            return torch.tensor(0.0, device=device)
+
+        mean_log_prob = (mask * log_prob).sum(dim=1) / (pos_per_sample + 1e-8)
+        loss = -mean_log_prob[has_pos].mean()
+        return loss
+
+
 def compute_me_loss(me_logits, me_labels):
     # Focal Loss with class weights for CASME2 4-class (exclude others)
     # 0:happiness(32), 1:surprise(28), 2:disgust(63), 3:repression(27)
@@ -187,6 +242,45 @@ class MetricsTracker:
 
 
 # =============================================================================
+# EMA (Exponential Moving Average)
+# =============================================================================
+
+class EMA:
+    """Exponential Moving Average of model parameters.
+
+    Maintains a shadow copy of model parameters with exponential decay.
+    At validation time, use EMA parameters for more stable predictions.
+    Typically improves accuracy by 1-3% on small datasets.
+    """
+    def __init__(self, model, decay=0.999):
+        self.decay = decay
+        self.shadow = {}
+        self.backup = {}
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.data.clone()
+
+    def update(self, model):
+        for name, param in model.named_parameters():
+            if param.requires_grad and name in self.shadow:
+                self.shadow[name].mul_(self.decay).add_(param.data, alpha=1.0 - self.decay)
+
+    def apply_shadow(self, model):
+        """Replace model params with EMA params for validation."""
+        for name, param in model.named_parameters():
+            if param.requires_grad and name in self.shadow:
+                self.backup[name] = param.data.clone()
+                param.data.copy_(self.shadow[name])
+
+    def restore(self, model):
+        """Restore original params after validation."""
+        for name, param in model.named_parameters():
+            if param.requires_grad and name in self.backup:
+                param.data.copy_(self.backup[name])
+        self.backup = {}
+
+
+# =============================================================================
 # CSV Logger
 # =============================================================================
 
@@ -273,7 +367,17 @@ class Trainer:
             'au': args.au_loss_weight,
             'moe': args.moe_loss_weight,
             'landmark': args.landmark_loss_weight,
+            'supcon': args.supcon_weight,
         }
+
+        # EMA
+        self.ema = None
+        if args.ema_decay > 0:
+            self.ema = EMA(model, decay=args.ema_decay)
+            print(f"[Trainer] EMA enabled (decay={args.ema_decay})")
+
+        # SupCon Loss
+        self.supcon_loss = SupConLoss(temperature=0.07)
 
         # CSV logger
         os.makedirs(args.output_dir, exist_ok=True)
@@ -322,6 +426,10 @@ class Trainer:
             else:
                 self.optimizer.step()
 
+            # EMA update
+            if self.ema is not None:
+                self.ema.update(self.model)
+
             # Update metrics
             with torch.no_grad():
                 metrics.update_me(outputs['me_logits'], me_labels)
@@ -348,16 +456,26 @@ class Trainer:
         loss_landmark = compute_landmark_loss(outputs['au_intensities'], au_labels)
         loss_moe = outputs['moe_aux_loss']
 
+        # SupCon loss on fused features
+        loss_supcon = torch.tensor(0.0, device=me_labels.device)
+        if self.loss_weights['supcon'] > 0 and 'adapted_feat' in outputs:
+            loss_supcon = self.supcon_loss(outputs['adapted_feat'], me_labels)
+
         total_loss = (
             self.loss_weights['me'] * loss_me +
             self.loss_weights['au'] * loss_au +
             self.loss_weights['moe'] * loss_moe +
-            self.loss_weights['landmark'] * loss_landmark
+            self.loss_weights['landmark'] * loss_landmark +
+            self.loss_weights['supcon'] * loss_supcon
         )
         return total_loss
 
     @torch.no_grad()
     def validate(self, val_loader):
+        # Apply EMA parameters for validation
+        if self.ema is not None:
+            self.ema.apply_shadow(self.model)
+
         self.model.eval()
         metrics = MetricsTracker()
 
@@ -379,6 +497,10 @@ class Trainer:
             metrics.update_loss('me', loss_me.item())
             metrics.update_loss('au', loss_au.item())
 
+        # Restore original parameters
+        if self.ema is not None:
+            self.ema.restore(self.model)
+
         return metrics
 
     def save_checkpoint(self, epoch, metrics, path, is_best=False):
@@ -395,6 +517,8 @@ class Trainer:
             },
             'args': vars(self.args),
         }
+        if self.ema is not None:
+            checkpoint['ema_shadow'] = self.ema.shadow
         torch.save(checkpoint, path)
         status = "BEST" if is_best else f"epoch {epoch}"
         print(f"[Trainer] Checkpoint saved ({status}): {path}")
@@ -493,6 +617,12 @@ def parse_args():
                         help='AU loss weight (reduced -- AU labels are noisy)')
     parser.add_argument('--moe_loss_weight', type=float, default=0.01)
     parser.add_argument('--landmark_loss_weight', type=float, default=0.05)
+    parser.add_argument('--supcon_weight', type=float, default=0.1,
+                        help='Supervised contrastive loss weight (0 to disable)')
+
+    # EMA
+    parser.add_argument('--ema_decay', type=float, default=0.999,
+                        help='EMA decay (0 to disable, 0.999 typical)')
 
     # Validation / Save
     parser.add_argument('--val_every', type=int, default=1)

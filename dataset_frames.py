@@ -121,6 +121,7 @@ class FrameSequenceDataset(Dataset):
                 'me_label': me_label,
                 'emotion': emotion,
                 'num_frames': num_frames,
+                'action_units': str(row['ActionUnits']) if pd.notna(row['ActionUnits']) else '',
             })
 
         samples_df = pd.DataFrame(samples)
@@ -270,7 +271,22 @@ class FrameSequenceDataset(Dataset):
 
         # Labels
         me_label = int(sample['me_label'])
-        au_label = torch.zeros(28, dtype=torch.float32)  # Placeholder
+
+        # Parse AU labels from action_units string
+        au_label = torch.zeros(28, dtype=torch.float32)
+        au_str = str(sample.get('action_units', ''))
+        if au_str and au_str != 'nan' and au_str != '':
+            # CASME2 AU format: "AU1+AU2+AU4" or "1+2+4"
+            for part in au_str.replace(' ', '').split('+'):
+                part = part.strip()
+                if part.startswith('AU'):
+                    part = part[2:]
+                try:
+                    au_id = int(part)
+                    if 1 <= au_id <= 28:
+                        au_label[au_id - 1] = 1.0
+                except ValueError:
+                    pass
 
         return frames_tensor, me_label, au_label
 

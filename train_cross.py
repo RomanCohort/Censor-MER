@@ -281,13 +281,10 @@ class CrossDatasetTrainer:
             new_linear = nn.Linear(old_linear.in_features, num_classes).to(self.device)
             nn.init.xavier_uniform_(new_linear.weight)
             expert[-1] = new_linear
-        # Reinitialize gating network
-        old_gate = moe.gate
-        moe.gate = nn.Sequential(
-            nn.Linear(moe.input_dim, moe.gating_hidden_dim),
-            nn.ReLU(),
-            nn.Linear(moe.gating_hidden_dim, moe.num_experts),
-        ).to(self.device)
+        # Reinitialize gating network (keep same structure, just reset weights)
+        for layer in moe.gate:
+            if hasattr(layer, 'reset_parameters'):
+                layer.reset_parameters()
         print(f"[Censor] Adjusted MoE for {num_classes} classes")
 
     def _load_pretrained(self, pretrained_path):

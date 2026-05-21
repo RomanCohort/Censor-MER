@@ -416,6 +416,7 @@ class Trainer:
     def train_epoch(self, train_loader):
         self.model.train()
         metrics = MetricsTracker()
+        accum_steps = self.args.grad_accum_steps
 
         for batch_idx, (videos, me_labels, au_labels) in enumerate(train_loader):
             videos = videos.to(self.device)
@@ -431,7 +432,9 @@ class Trainer:
                     videos, me_labels, au_labels, alpha=self.args.mixup_alpha
                 )
 
-            self.optimizer.zero_grad()
+            # Only zero gradients at the start of accumulation cycle
+            if batch_idx % accum_steps == 0:
+                self.optimizer.zero_grad()
 
             if self.use_amp:
                 with torch.cuda.amp.autocast():
@@ -440,12 +443,16 @@ class Trainer:
                         outputs, me_labels, au_labels,
                         me_labels_b, au_labels_b, lam
                     )
+                    # Scale loss for gradient accumulation
+                    total_loss = total_loss / accum_steps
             else:
                 outputs = self.model(videos)
                 total_loss = self._compute_loss(
                     outputs, me_labels, au_labels,
                     me_labels_b, au_labels_b, lam
                 )
+                # Scale loss for gradient accumulation
+                total_loss = total_loss / accum_steps
 
             # BioMoE feedback
             if hasattr(self.model, 'moe') and hasattr(self.model.moe, 'apply_feedback'):
@@ -456,24 +463,27 @@ class Trainer:
                     if hasattr(self.model.moe, 'mode') and self.model.moe.mode == 'hybrid':
                         self.model.moe.apply_feedback(fb)
 
-            # Backward
+            # Backward (accumulate gradients)
             if self.use_amp:
                 self.scaler.scale(total_loss).backward()
-                self.scaler.unscale_(self.optimizer)
             else:
                 total_loss.backward()
 
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm)
+            # Only step optimizer at the end of accumulation cycle
+            if (batch_idx + 1) % accum_steps == 0 or (batch_idx + 1) == len(train_loader):
+                if self.use_amp:
+                    self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm)
 
-            if self.use_amp:
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-            else:
-                self.optimizer.step()
+                if self.use_amp:
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    self.optimizer.step()
 
-            # EMA update
-            if self.ema is not None:
-                self.ema.update(self.model)
+                # EMA update
+                if self.ema is not None:
+                    self.ema.update(self.model)
 
             # Update metrics
             with torch.no_grad():
@@ -587,6 +597,27 @@ class Trainer:
         for epoch in range(1, args.epochs + 1):
             epoch_start = time.time()
 
+            # Classifier reset: re-initialize MoE head at specified epoch
+            # Prevents early noisy training from polluting the classifier
+            if args.reset_classifier_epoch > 0 and epoch == args.reset_classifier_epoch:
+                print(f"\n[ClassifierReset] Re-initializing MoE head at epoch {epoch}")
+                for name, module in self.model.named_modules():
+                    if hasattr(module, 'reset_parameters') and ('moe' in name or 'radar' in name):
+                        module.reset_parameters()
+                # Also reset optimizer state for MoE params
+                for group in self.optimizer.param_groups:
+                    for p in group['params']:
+                        if p.requires_grad:
+                            # Only reset state for MoE/radar params
+                            param_name = None
+                            for n, mp in self.model.named_parameters():
+                                if mp is p:
+                                    param_name = n
+                                    break
+                            if param_name and ('moe' in param_name or 'radar' in param_name):
+                                if p in self.optimizer.state:
+                                    self.optimizer.state[p]['step'] = 0
+
             # Unfreeze backbones after freeze_epochs
             if args.freeze_backbone and epoch == args.freeze_epochs + 1:
                 print(f"\n[Unfreeze] Unfreezing backbones at epoch {epoch}")
@@ -688,6 +719,15 @@ def parse_args():
     # Label Smoothing
     parser.add_argument('--label_smoothing', type=float, default=0.1,
                         help='Label smoothing factor (0 to disable)')
+
+    # Gradient Accumulation
+    parser.add_argument('--grad_accum_steps', type=int, default=2,
+                        help='Gradient accumulation steps (effective batch = batch_size * steps)')
+
+    # Classifier Reset
+    parser.add_argument('--reset_classifier_epoch', type=int, default=100,
+                        help='Reset classifier head at this epoch (0 to disable). '
+                             'Prevents early noisy gradients from polluting the head.')
 
     # Validation / Save
     parser.add_argument('--val_every', type=int, default=1)

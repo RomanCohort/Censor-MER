@@ -573,6 +573,47 @@ class FrameSequenceDataset(Dataset):
             ew_start = random.randint(0, W - ew)
             frames_tensor[:, :, eh_start:eh_start + eh, ew_start:ew_start + ew] = 0
 
+        # Temporal dropout: randomly zero out 1-2 frames (simulate frame loss)
+        if random.random() < 0.2:
+            C, T, H, W = frames_tensor.shape
+            num_drop = random.randint(1, 2)
+            drop_indices = random.sample(range(T), min(num_drop, T))
+            for di in drop_indices:
+                frames_tensor[:, di, :, :] = 0
+
+        # Temporal speed perturbation: speed up or slow down by small factor
+        if random.random() < 0.15:
+            C, T, H, W = frames_tensor.shape
+            speed_factor = random.uniform(0.8, 1.2)
+            new_T = int(T / speed_factor)
+            if new_T >= 4 and new_T != T:
+                indices = torch.linspace(0, T - 1, new_T).long()
+                resampled = frames_tensor[:, indices, :, :]
+                # Resize back to T frames
+                indices_back = torch.linspace(0, new_T - 1, T).long()
+                frames_tensor = resampled[:, indices_back, :, :]
+
+        # Elastic deformation: simulate subtle facial muscle variation
+        # (biomimetic: facial muscles deform elastically, not rigidly)
+        if random.random() < 0.15:
+            C, T, H, W = frames_tensor.shape
+            # Generate random displacement fields
+            alpha = random.uniform(8, 15)  # deformation magnitude
+            sigma = random.uniform(3, 5)   # smoothing sigma
+            dx = np.random.randn(H, W) * alpha
+            dy = np.random.randn(H, W) * alpha
+            dx = cv2.GaussianBlur(dx, (0, 0), sigma).astype(np.float32)
+            dy = cv2.GaussianBlur(dy, (0, 0), sigma).astype(np.float32)
+            # Apply same deformation to all frames (consistent spatial warp)
+            for t in range(T):
+                frame = frames_tensor[:, t, :, :].permute(1, 2, 0).cpu().numpy()  # (H, W, C)
+                # Remap coordinates
+                x, y = np.meshgrid(np.arange(W), np.arange(H))
+                map_x = (x + dx).astype(np.float32)
+                map_y = (y + dy).astype(np.float32)
+                warped = cv2.remap(frame, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+                frames_tensor[:, t, :, :] = torch.from_numpy(warped).permute(2, 0, 1)
+
         return frames_tensor
 
     def __getitem__(self, idx):

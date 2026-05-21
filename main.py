@@ -75,8 +75,10 @@ class Censor(nn.Module):
           -> EmotionReporter: Structured clinical reports
     """
 
-    def __init__(self):
+    def __init__(self, fast_preprocess=False):
         super().__init__()
+
+        self.fast_preprocess = fast_preprocess
 
         # =====================================================================
         # Stage 1: Biomimetic Preprocessing
@@ -84,7 +86,11 @@ class Censor(nn.Module):
         print("[Censor] Initializing Preprocessing...")
         self.saliency = SaliencyDetector()
         self.rppg = rPPGExtractor()
-        self.flow = TVL1OpticalFlow()
+        if not fast_preprocess:
+            self.flow = TVL1OpticalFlow()
+        else:
+            self.flow = None
+            print("[Censor] Fast preprocess mode: using frame difference instead of TV-L1 optical flow")
 
         # =====================================================================
         # Stage 2: Dual-Pathway Backbones
@@ -181,19 +187,32 @@ class Censor(nn.Module):
         # Output: (B, 3, T, H, W) blood-flow signal
         rppg_heatmap = self.rppg(x_salient)
 
-        # 1c) TV-L1 optical flow between consecutive frames
-        # Output per pair: (B, 2, H, W) -> stacked: (B, 2, T, H, W)
-        flow_maps = []
-        for t in range(T - 1):
-            flow_t = self.flow(
-                x_salient[:, :, t],    # Previous frame
-                x_salient[:, :, t + 1]  # Current frame
-            )  # (B, 2, H, W)
-            flow_maps.append(flow_t)
-        flow_stack = torch.stack(flow_maps, dim=2)  # (B, 2, T-1, H, W)
-        # Pad last frame with duplicate of previous flow
-        flow_pad = flow_stack[:, :, -1:, :, :]
-        flow_stack = torch.cat([flow_stack, flow_pad], dim=2)  # (B, 2, T, H, W)
+        # 1c) Optical flow: TV-L1 (slow) or frame difference (fast)
+        if self.fast_preprocess:
+            # Fast mode: frame difference as motion proxy (GPU, ~ms)
+            # Compute temporal difference between consecutive frames
+            diff = x_salient[:, :, 1:, :, :] - x_salient[:, :, :-1, :, :]
+            # Split into x-like and y-like motion channels
+            flow_x = diff.mean(dim=1, keepdim=True)  # (B, 1, T-1, H, W)
+            flow_y = diff.std(dim=1, keepdim=True)    # (B, 1, T-1, H, W)
+            # Pad last frame
+            flow_x_pad = flow_x[:, :, -1:, :, :]
+            flow_y_pad = flow_y[:, :, -1:, :, :]
+            flow_x = torch.cat([flow_x, flow_x_pad], dim=2)  # (B, 1, T, H, W)
+            flow_y = torch.cat([flow_y, flow_y_pad], dim=2)  # (B, 1, T, H, W)
+            flow_stack = torch.cat([flow_x, flow_y], dim=1)  # (B, 2, T, H, W)
+        else:
+            # Full mode: TV-L1 optical flow (CPU, ~seconds per batch)
+            flow_maps = []
+            for t in range(T - 1):
+                flow_t = self.flow(
+                    x_salient[:, :, t],
+                    x_salient[:, :, t + 1]
+                )
+                flow_maps.append(flow_t)
+            flow_stack = torch.stack(flow_maps, dim=2)
+            flow_pad = flow_stack[:, :, -1:, :, :]
+            flow_stack = torch.cat([flow_stack, flow_pad], dim=2)
         print(f"[Censor] Flow stack: {flow_stack.shape}")
 
         # =====================================================================

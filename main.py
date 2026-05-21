@@ -75,10 +75,11 @@ class Censor(nn.Module):
           -> EmotionReporter: Structured clinical reports
     """
 
-    def __init__(self, fast_preprocess=False):
+    def __init__(self, fast_preprocess=False, verbose=True):
         super().__init__()
 
         self.fast_preprocess = fast_preprocess
+        self.verbose = verbose
 
         # =====================================================================
         # Stage 1: Biomimetic Preprocessing
@@ -165,17 +166,20 @@ class Censor(nn.Module):
                 - 'template_report': list[str] structured reports
                 - 'llm_report': list[str] free-text reports (placeholder)
         """
-        print(f"\n{'='*60}")
-        print(f" Censor Forward Pass")
-        print(f"{'='*60}")
-        print(f"Input video: {x.shape}")
+        # Training mode: suppress verbose prints
+        if self.verbose:
+            if self.verbose: print(f"\n{'='*60}")
+            if self.verbose: print(f" Censor Forward Pass")
+            if self.verbose: print(f"{'='*60}")
+            if self.verbose: print(f"Input video: {x.shape}")
 
         B, C, T, H, W = x.shape
 
         # =====================================================================
         # Stage 1: Preprocessing
         # =====================================================================
-        print(f"\n--- Stage 1: Preprocessing ---")
+        if self.verbose:
+            if self.verbose: print(f"\n--- Stage 1: Preprocessing ---")
 
         # 1a) Saliency detection (fovea simulation)
         # Output: (B, 1, T, H, W) spatial prior map
@@ -213,12 +217,12 @@ class Censor(nn.Module):
             flow_stack = torch.stack(flow_maps, dim=2)
             flow_pad = flow_stack[:, :, -1:, :, :]
             flow_stack = torch.cat([flow_stack, flow_pad], dim=2)
-        print(f"[Censor] Flow stack: {flow_stack.shape}")
+        if self.verbose: print(f"[Censor] Flow stack: {flow_stack.shape}")
 
         # =====================================================================
         # Stage 2: Dual-Pathway Backbones
         # =====================================================================
-        print(f"\n--- Stage 2: Dual-Pathway Backbones ---")
+        if self.verbose: print(f"\n--- Stage 2: Dual-Pathway Backbones ---")
 
         # Fast Pathway (subcortical): optical flow input
         # Input: (B, 2, T, H, W) -> Output: (B, 512)
@@ -232,7 +236,7 @@ class Censor(nn.Module):
         # =====================================================================
         # Stage 2.5: Sparse Control for Pathways
         # =====================================================================
-        print(f"\n--- Stage 2.5: Sparse Control (Pathways) ---")
+        if self.verbose: print(f"\n--- Stage 2.5: Sparse Control (Pathways) ---")
         pathway_feats = {'fast_path': fast_feat, 'slow_path': slow_feat}
         pathway_feats, pathway_stats = self.sparse_control(pathway_feats)
         fast_feat = pathway_feats['fast_path']
@@ -240,12 +244,12 @@ class Censor(nn.Module):
         # Log stats for each pathway
         for name, stats in pathway_stats.items():
             if stats:
-                print(f"[Sparse-{name}] frozen={stats.get('frozen_ratio', 0):.3f}, usage={stats.get('usage_ratio', 0):.3f}")
+                if self.verbose: print(f"[Sparse-{name}] frozen={stats.get('frozen_ratio', 0):.3f}, usage={stats.get('usage_ratio', 0):.3f}")
 
         # =====================================================================
         # Stage 3: Attention Modulation
         # =====================================================================
-        print(f"\n--- Stage 3: Attention Modulation ---")
+        if self.verbose: print(f"\n--- Stage 3: Attention Modulation ---")
 
         # Amygdala: generates Attention Prior Map from fast features
         # Input: (B, 512) -> Output: (B, 1, 14, 14)
@@ -273,20 +277,20 @@ class Censor(nn.Module):
         # =====================================================================
         # Stage 4: TSFmicroFusion
         # =====================================================================
-        print(f"\n--- Stage 4: TSFmicroFusion ---")
+        if self.verbose: print(f"\n--- Stage 4: TSFmicroFusion ---")
 
         fused_feat = self.fusion(fast_gated, slow_for_fusion)  # (B, 1024)
 
         # =====================================================================
         # Stage 4.5: Sparse Control for Fusion
         # =====================================================================
-        print(f"\n--- Stage 4.5: Sparse Control ---")
+        if self.verbose: print(f"\n--- Stage 4.5: Sparse Control ---")
         # Apply sparse control to fusion output
         fusion_feats, fusion_stats = self.sparse_control({'fusion': fused_feat})
         fused_feat = fusion_feats['fusion']
         fusion_stat = fusion_stats.get('fusion', {})
         if fusion_stat:
-            print(f"[Sparse-fusion] frozen={fusion_stat.get('frozen_ratio', 0):.3f}, "
+            if self.verbose: print(f"[Sparse-fusion] frozen={fusion_stat.get('frozen_ratio', 0):.3f}, "
                   f"usage={fusion_stat.get('usage_ratio', 0):.3f}")
 
         # Collect all sparse stats
@@ -295,14 +299,14 @@ class Censor(nn.Module):
         # =====================================================================
         # Stage 5: Dynamic AU Decoder
         # =====================================================================
-        print(f"\n--- Stage 5: AU Decoder ---")
+        if self.verbose: print(f"\n--- Stage 5: AU Decoder ---")
 
         au_intensities, au_opd = self.au_decoder(fused_feat)  # (B, 16, 28), (B, 28, 3)
 
         # =====================================================================
         # Stage 6: MoE Head & Personalized Radar
         # =====================================================================
-        print(f"\n--- Stage 6: MoE Head ---")
+        if self.verbose: print(f"\n--- Stage 6: MoE Head ---")
 
         me_logits, expert_gates, moe_aux_loss = self.moe(fused_feat)  # (B, 7), (B, 3), scalar
 
@@ -312,25 +316,25 @@ class Censor(nn.Module):
         # =====================================================================
         # Stage 7: Emotion Reporter
         # =====================================================================
-        print(f"\n--- Stage 7: Emotion Reporter ---")
+        if self.verbose: print(f"\n--- Stage 7: Emotion Reporter ---")
 
         template_reports, llm_reports = self.reporter(fused_feat, au_intensities, me_logits)
 
         # =====================================================================
         # Final Summary
         # =====================================================================
-        print(f"\n{'='*60}")
-        print(f" Final Output Summary")
-        print(f"{'='*60}")
-        print(f"  ME Logits:       {me_logits.shape}")
-        print(f"  AU Intensities:  {au_intensities.shape}")
-        print(f"  AU OPD:          {au_opd.shape}")
-        print(f"  Apex Scores:     {apex_scores.shape}")
-        print(f"  Expert Gates:    {expert_gates.shape}")
-        print(f"  MoE Aux Loss:    {moe_aux_loss.item():.6f}")
-        print(f"  Adapted Feat:    {adapted_feat.shape}")
-        print(f"  Reports:         {len(template_reports)} templates")
-        print(f"{'='*60}\n")
+        if self.verbose: print(f"\n{'='*60}")
+        if self.verbose: print(f" Final Output Summary")
+        if self.verbose: print(f"{'='*60}")
+        if self.verbose: print(f"  ME Logits:       {me_logits.shape}")
+        if self.verbose: print(f"  AU Intensities:  {au_intensities.shape}")
+        if self.verbose: print(f"  AU OPD:          {au_opd.shape}")
+        if self.verbose: print(f"  Apex Scores:     {apex_scores.shape}")
+        if self.verbose: print(f"  Expert Gates:    {expert_gates.shape}")
+        if self.verbose: print(f"  MoE Aux Loss:    {moe_aux_loss.item():.6f}")
+        if self.verbose: print(f"  Adapted Feat:    {adapted_feat.shape}")
+        if self.verbose: print(f"  Reports:         {len(template_reports)} templates")
+        if self.verbose: print(f"{'='*60}\n")
 
         return {
             'me_logits': me_logits,
@@ -351,9 +355,9 @@ class Censor(nn.Module):
 # =============================================================================
 
 if __name__ == '__main__':
-    print("=" * 60)
-    print(" Censor -- Biomimetic Dual-Pathway MER System")
-    print("=" * 60)
+    if self.verbose: print("=" * 60)
+    if self.verbose: print(" Censor -- Biomimetic Dual-Pathway MER System")
+    if self.verbose: print("=" * 60)
 
     # Build model
     model = Censor()
@@ -361,26 +365,26 @@ if __name__ == '__main__':
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Total parameters:     {total_params:>12,}")
-    print(f"Trainable parameters: {trainable_params:>12,}")
-    print()
+    if self.verbose: print(f"Total parameters:     {total_params:>12,}")
+    if self.verbose: print(f"Trainable parameters: {trainable_params:>12,}")
+    if self.verbose: print()
 
     # Create dummy input: (B=2, C=3, T=16, H=224, W=224)
     dummy_input = torch.randn(2, 3, 16, 224, 224)
-    print(f"\nDummy input shape: {dummy_input.shape}")
+    if self.verbose: print(f"\nDummy input shape: {dummy_input.shape}")
 
     # Forward pass
     with torch.no_grad():
         outputs = model(dummy_input)
 
-    print("\n" + "=" * 60)
-    print(" Forward Pass Completed Successfully!")
-    print("=" * 60)
+    if self.verbose: print("\n" + "=" * 60)
+    if self.verbose: print(" Forward Pass Completed Successfully!")
+    if self.verbose: print("=" * 60)
 
     # Print sample report
-    print("\nSample template report (Subject 0):")
-    print("-" * 40)
-    print(outputs['template_report'][0])
+    if self.verbose: print("\nSample template report (Subject 0):")
+    if self.verbose: print("-" * 40)
+    if self.verbose: print(outputs['template_report'][0])
 
     # Verify all expected keys present
     expected_keys = [
@@ -390,8 +394,8 @@ if __name__ == '__main__':
     ]
     missing_keys = [k for k in expected_keys if k not in outputs]
     if missing_keys:
-        print(f"\nWARNING: Missing output keys: {missing_keys}")
+        if self.verbose: print(f"\nWARNING: Missing output keys: {missing_keys}")
     else:
-        print("\nAll expected output keys present. Verification complete.")
+        if self.verbose: print("\nAll expected output keys present. Verification complete.")
 
-    print("\nDone.")
+    if self.verbose: print("\nDone.")

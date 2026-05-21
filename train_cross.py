@@ -276,12 +276,26 @@ class CrossDatasetTrainer:
         """Adjust MoE head output for different number of classes."""
         moe = self.model.moe
         # Reinitialize the expert heads for new class count
-        for expert in moe.experts:
-            old_linear = expert[-1]  # Last layer is Linear
-            new_linear = nn.Linear(old_linear.in_features, num_classes).to(self.device)
-            nn.init.xavier_uniform_(new_linear.weight)
-            expert[-1] = new_linear
-        # Reinitialize gating network (keep same structure, just reset weights)
+        new_experts = nn.ModuleList()
+        for i, expert in enumerate(moe.experts):
+            # Get hidden_dim from existing expert
+            hidden_dim = expert[0].out_features
+            input_dim = expert[0].in_features
+            new_expert = nn.Sequential(
+                nn.Linear(input_dim, hidden_dim),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.1),
+                nn.Linear(hidden_dim, num_classes),
+            ).to(self.device)
+            # Copy first layer weights from old expert
+            new_expert[0].weight.data = expert[0].weight.data.clone()
+            new_expert[0].bias.data = expert[0].bias.data.clone()
+            # Xavier init for new output layer
+            nn.init.xavier_uniform_(new_expert[-1].weight)
+            nn.init.zeros_(new_expert[-1].bias)
+            new_experts.append(new_expert)
+        moe.experts = new_experts
+        # Reinitialize gating network
         for layer in moe.gate:
             if hasattr(layer, 'reset_parameters'):
                 layer.reset_parameters()

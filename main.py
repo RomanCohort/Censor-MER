@@ -318,7 +318,11 @@ class Censor(nn.Module):
         # =====================================================================
         if self.verbose: print(f"\n--- Stage 7: Emotion Reporter ---")
 
-        template_reports, llm_reports = self.reporter(fused_feat, au_intensities, me_logits)
+        # Skip reporter during training (no LLM needed)
+        if self.verbose:
+            template_reports, llm_reports = self.reporter(fused_feat, au_intensities, me_logits)
+        else:
+            template_reports, llm_reports = {}, {}
 
         # =====================================================================
         # Final Summary

@@ -710,6 +710,11 @@ def get_loso_subjects(data_root):
     """
     labels_path = os.path.join(data_root, 'labels.csv')
     if not os.path.exists(labels_path):
+        # Trigger Excel -> CSV conversion by instantiating dataset briefly
+        print(f"[get_loso_subjects] labels.csv not found, triggering conversion...")
+        ds = FrameSequenceDataset(data_root, split='train', face_align=False)
+        labels_path = os.path.join(data_root, 'labels.csv')
+    if not os.path.exists(labels_path):
         return None
     samples = pd.read_csv(labels_path)
     return sorted(samples['subject'].unique())

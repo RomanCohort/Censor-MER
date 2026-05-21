@@ -310,14 +310,17 @@ class Censor(nn.Module):
         # =====================================================================
         # Stage 4.5: Sparse Control for Fusion
         # =====================================================================
-        if self.verbose: print(f"\n--- Stage 4.5: Sparse Control ---")
-        # Apply sparse control to fusion output
-        fusion_feats, fusion_stats = self.sparse_control({'fusion': fused_feat})
-        fused_feat = fusion_feats['fusion']
-        fusion_stat = fusion_stats.get('fusion', {})
-        if fusion_stat:
-            if self.verbose: print(f"[Sparse-fusion] frozen={fusion_stat.get('frozen_ratio', 0):.3f}, "
-                  f"usage={fusion_stat.get('usage_ratio', 0):.3f}")
+        if self.enable_sparse_control and self.sparse_control is not None:
+            if self.verbose: print(f"\n--- Stage 4.5: Sparse Control ---")
+            # Apply sparse control to fusion output
+            fusion_feats, fusion_stats = self.sparse_control({'fusion': fused_feat})
+            fused_feat = fusion_feats['fusion']
+            fusion_stat = fusion_stats.get('fusion', {})
+            if fusion_stat:
+                if self.verbose: print(f"[Sparse-fusion] frozen={fusion_stat.get('frozen_ratio', 0):.3f}, "
+                      f"usage={fusion_stat.get('usage_ratio', 0):.3f}")
+        else:
+            fusion_stats = {}
 
         # Collect all sparse stats
         all_sparse_stats = {**pathway_stats, **fusion_stats}

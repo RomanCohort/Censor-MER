@@ -791,3 +791,473 @@ if __name__ == '__main__':
         break
 
     print("\n[Success] Dataset test passed!")
+
+
+# =============================================================================
+# Dict-format Dataset Wrappers (for train_cross.py compatibility)
+# =============================================================================
+# These wrappers return dict format {'frames', 'me_label', 'au_label', 'subject'}
+# instead of tuple format (video, me_label, au_label), enabling ConcatDataset
+# across CASME2, SMIC, and SAMM with unified label mapping.
+
+class CASME2FrameDataset(Dataset):
+    """
+    CASME2 dataset wrapper returning dict format with unified emotion mapping.
+
+    Supports custom emotion_map for cross-dataset joint training.
+    """
+    EXCLUDE_EMOTIONS = {'sadness', 'fear', 'anger', 'contempt', 'others'}
+
+    def __init__(self, root_dir, T=16, H=224, W=224, augment=True,
+                 emotion_map=None, exclude_negative=True, face_align=True):
+        """
+        Args:
+            root_dir: CASME2 data root (contains cropped/ and labels.csv)
+            T, H, W: Frame sampling parameters
+            augment: Apply data augmentation
+            emotion_map: Custom emotion mapping dict. If None, uses default 4-class.
+            exclude_negative: Exclude samples with label=-1 (others class)
+            face_align: Apply gaze stabilization reflex
+        """
+        self.root_dir = root_dir
+        self.T = T
+        self.H = H
+        self.W = W
+        self.augment = augment
+        self.face_align = face_align
+        self.emotion_map = emotion_map or {
+            'happiness': 0, 'surprise': 1, 'disgust': 2, 'repression': 3,
+        }
+        self.exclude_negative = exclude_negative
+
+        self.cropped_dir = os.path.join(root_dir, 'cropped')
+
+        # Load labels
+        labels_path = os.path.join(root_dir, 'labels.csv')
+        if not os.path.exists(labels_path):
+            # Convert from Excel
+            from scripts.convert_casme2 import convert_casme2_to_standard
+            convert_casme2_to_standard(root_dir)
+            labels_path = os.path.join(root_dir, 'labels.csv')
+
+        self.samples = pd.read_csv(labels_path)
+
+        # Apply emotion mapping and filtering
+        if emotion_map is not None:
+            # Remap labels using custom emotion_map
+            valid_indices = []
+            for idx, row in self.samples.iterrows():
+                emotion = str(row.get('emotion', '')).strip().lower()
+                new_label = emotion_map.get(emotion, -1)
+                if exclude_negative and new_label == -1:
+                    continue
+                self.samples.at[idx, 'me_label'] = new_label
+                valid_indices.append(idx)
+            self.samples = self.samples.loc[valid_indices].reset_index(drop=True)
+        else:
+            # Default: exclude 'others' class
+            self.samples = self.samples[
+                self.samples['me_label'] != -1
+            ].reset_index(drop=True)
+
+        # Store subjects for LOSO
+        self.subjects = sorted(self.samples['subject'].unique())
+
+        # ImageNet normalization
+        self.mean = torch.tensor(DATA_CONFIG['normalize_mean']).view(3, 1, 1, 1)
+        self.std = torch.tensor(DATA_CONFIG['normalize_std']).view(3, 1, 1, 1)
+
+        print(f"[CASME2FrameDataset] {len(self.samples)} samples, {len(self.subjects)} subjects")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        sample = self.samples.iloc[idx]
+
+        # Load frames
+        frame_dir = os.path.join(self.cropped_dir, sample['video_path'])
+        frame_files = sorted([f for f in os.listdir(frame_dir) if f.endswith('.jpg')])
+        frames = []
+        for ff in frame_files:
+            frame = cv2.imread(os.path.join(frame_dir, ff))
+            if frame is not None:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frames.append(frame)
+        if len(frames) == 0:
+            # Return dummy
+            frames = np.zeros((self.T, self.H, self.W, 3), dtype=np.uint8)
+
+        frames = np.stack(frames, axis=0)  # (T_orig, H, W, 3)
+
+        # Sample T frames with apex-centered strategy
+        onset = int(sample.get('onset', 0)) if pd.notna(sample.get('onset', 0)) else 0
+        apex = int(sample.get('apex', 0)) if pd.notna(sample.get('apex', 0)) else 0
+        offset = int(sample.get('offset', 0)) if pd.notna(sample.get('offset', 0)) else 0
+
+        # Use FrameSequenceDataset's _sample_frames logic
+        total = len(frames)
+        T = self.T
+        if total <= T:
+            indices = np.arange(T) % total
+            frames = frames[indices]
+        else:
+            onset_idx = max(0, onset - 1) if onset > 0 else 0
+            apex_idx = min(total - 1, apex - 1) if apex > 0 else total // 2
+            offset_idx = min(total - 1, offset - 1) if offset > 0 else total - 1
+            if apex_idx <= onset_idx:
+                apex_idx = min(onset_idx + total // 4, total - 1)
+            if offset_idx <= apex_idx:
+                offset_idx = min(apex_idx + total // 4, total - 1)
+
+            n_before = int(T * 0.4)
+            n_apex = max(1, T - 2 * n_before)
+            n_after = T - n_before - n_apex
+            before = np.linspace(onset_idx, apex_idx, n_before + 1).astype(int)[:n_before]
+            at_apex = np.full(n_apex, apex_idx, dtype=int)
+            after = np.linspace(apex_idx, offset_idx, n_after + 1).astype(int)[1:n_after + 1]
+            indices = np.concatenate([before, at_apex, after])
+            if len(indices) < T:
+                indices = np.concatenate([indices, np.full(T - len(indices), indices[-1], dtype=int)])
+            indices = indices[:T]
+            indices = np.clip(indices, 0, total - 1)
+            frames = frames[indices]
+
+        # Resize + align
+        if self.face_align:
+            frames = align_face_sequence(frames, target_size=(self.W, self.H))
+        else:
+            frames = np.stack([cv2.resize(f, (self.W, self.H)) for f in frames], axis=0)
+
+        # To tensor
+        frames_tensor = torch.from_numpy(frames).float() / 255.0
+        frames_tensor = frames_tensor.permute(3, 0, 1, 2)  # (C, T, H, W)
+        frames_tensor = (frames_tensor - self.mean) / self.std
+
+        # Augment
+        if self.augment:
+            frames_tensor = self._augment(frames_tensor)
+
+        # Labels
+        me_label = int(sample['me_label'])
+        au_label = torch.zeros(28, dtype=torch.float32)
+        au_str = str(sample.get('action_units', ''))
+        if au_str and au_str != 'nan' and au_str != '':
+            for part in au_str.replace(' ', '').split('+'):
+                part = part.strip()
+                if part.startswith('L') or part.startswith('R'):
+                    part = part[1:]
+                if part.startswith('AU'):
+                    part = part[2:]
+                try:
+                    au_id = int(part)
+                    if 1 <= au_id <= 28:
+                        au_label[au_id - 1] = 1.0
+                except ValueError:
+                    pass
+
+        return {
+            'frames': frames_tensor,
+            'me_label': me_label,
+            'au_label': au_label,
+            'subject': sample.get('subject', ''),
+        }
+
+    def get_subject(self, idx):
+        """Get subject ID for LOSO."""
+        return self.samples.iloc[idx].get('subject', '')
+
+    def _augment(self, frames_tensor):
+        """Apply augmentation to video tensor (C, T, H, W)."""
+        # Horizontal flip
+        if random.random() < 0.5:
+            frames_tensor = frames_tensor.flip(-1)
+        # Color jitter
+        if random.random() < 0.3:
+            b = 1.0 + random.uniform(-0.1, 0.1)
+            frames_tensor = frames_tensor * b
+            frames_tensor = frames_tensor.clamp(0, 1)
+        # Random erasing
+        if random.random() < 0.15:
+            C, T, H, W = frames_tensor.shape
+            eh = random.randint(H // 8, H // 4)
+            ew = random.randint(W // 8, W // 4)
+            eh_start = random.randint(0, H - eh)
+            ew_start = random.randint(0, W - ew)
+            frames_tensor[:, :, eh_start:eh_start + eh, ew_start:ew_start + ew] = 0
+        return frames_tensor
+
+
+class SMICFrameDataset(Dataset):
+    """
+    SMIC dataset wrapper returning dict format with unified emotion mapping.
+    """
+    def __init__(self, root_dir, T=16, H=224, W=224, augment=True,
+                 emotion_map=None, exclude_negative=True, face_align=True):
+        self.root_dir = root_dir
+        self.T = T
+        self.H = H
+        self.W = W
+        self.augment = augment
+        self.face_align = face_align
+
+        # SMIC emotion mapping
+        default_map = {'positive': 0, 'negative': 2, 'surprise': 1}
+        self.emotion_map = emotion_map or default_map
+
+        # Find SMIC directory
+        self.smic_dir = root_dir
+        for candidate in [os.path.join(root_dir, 'SMIC_all_cropped'),
+                          os.path.join(root_dir, 'HS'),
+                          root_dir]:
+            if os.path.exists(candidate):
+                hs_dir = os.path.join(candidate, 'HS')
+                if os.path.exists(hs_dir):
+                    self.smic_dir = hs_dir
+                    break
+
+        # Build sample list
+        self.samples = self._build_samples()
+        if exclude_negative:
+            self.samples = [s for s in self.samples if s['me_label'] >= 0]
+
+        # Store subjects
+        self.subjects = sorted(set(s['subject'] for s in self.samples))
+
+        # Normalization
+        self.mean = torch.tensor(DATA_CONFIG['normalize_mean']).view(3, 1, 1, 1)
+        self.std = torch.tensor(DATA_CONFIG['normalize_std']).view(3, 1, 1, 1)
+
+        print(f"[SMICFrameDataset] {len(self.samples)} samples, {len(self.subjects)} subjects")
+
+    def _build_samples(self):
+        samples = []
+        for subject_dir in sorted(os.listdir(self.smic_dir)):
+            subject_path = os.path.join(self.smic_dir, subject_dir)
+            if not os.path.isdir(subject_path):
+                continue
+            micro_dir = os.path.join(subject_path, 'micro')
+            if not os.path.exists(micro_dir):
+                continue
+            for emotion_dir in sorted(os.listdir(micro_dir)):
+                emotion_path = os.path.join(micro_dir, emotion_dir)
+                if not os.path.isdir(emotion_path):
+                    continue
+                me_label = self.emotion_map.get(emotion_dir, -1)
+                for sample_dir in sorted(os.listdir(emotion_path)):
+                    sample_path = os.path.join(emotion_path, sample_dir)
+                    if not os.path.isdir(sample_path):
+                        continue
+                    frame_files = sorted([f for f in os.listdir(sample_path)
+                                          if f.endswith('.bmp') or f.endswith('.jpg')])
+                    if len(frame_files) == 0:
+                        continue
+                    samples.append({
+                        'path': sample_path,
+                        'subject': subject_dir,
+                        'me_label': me_label,
+                        'emotion': emotion_dir,
+                        'num_frames': len(frame_files),
+                    })
+        return samples
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
+        frame_dir = sample['path']
+        frame_files = sorted([f for f in os.listdir(frame_dir)
+                              if f.endswith('.bmp') or f.endswith('.jpg')])
+        frames = []
+        for ff in frame_files:
+            frame = cv2.imread(os.path.join(frame_dir, ff))
+            if frame is not None:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frames.append(frame)
+        if len(frames) == 0:
+            frames = np.zeros((self.T, self.H, self.W, 3), dtype=np.uint8)
+        frames = np.stack(frames, axis=0)
+
+        # Sample T frames (center around estimated apex)
+        total = len(frames)
+        T = self.T
+        if total <= T:
+            indices = np.arange(T) % total
+            frames = frames[indices]
+        else:
+            apex_idx = total // 2
+            n_before = int(T * 0.4)
+            n_apex = max(1, T - 2 * n_before)
+            n_after = T - n_before - n_apex
+            before = np.linspace(0, apex_idx, n_before + 1).astype(int)[:n_before]
+            at_apex = np.full(n_apex, apex_idx, dtype=int)
+            after = np.linspace(apex_idx, total - 1, n_after + 1).astype(int)[1:n_after + 1]
+            indices = np.concatenate([before, at_apex, after])
+            indices = indices[:T]
+            indices = np.clip(indices, 0, total - 1)
+            frames = frames[indices]
+
+        # Resize + align
+        if self.face_align:
+            frames = align_face_sequence(frames, target_size=(self.W, self.H))
+        else:
+            frames = np.stack([cv2.resize(f, (self.W, self.H)) for f in frames], axis=0)
+
+        # To tensor
+        frames_tensor = torch.from_numpy(frames).float() / 255.0
+        frames_tensor = frames_tensor.permute(3, 0, 1, 2)
+        frames_tensor = (frames_tensor - self.mean) / self.std
+
+        if self.augment:
+            if random.random() < 0.5:
+                frames_tensor = frames_tensor.flip(-1)
+
+        return {
+            'frames': frames_tensor,
+            'me_label': sample['me_label'],
+            'au_label': torch.zeros(28, dtype=torch.float32),
+            'subject': sample['subject'],
+        }
+
+    def get_subject(self, idx):
+        return self.samples[idx]['subject']
+
+
+class SAMMFrameDataset(Dataset):
+    """
+    SAMM dataset wrapper returning dict format with unified emotion mapping.
+    """
+    def __init__(self, root_dir, T=16, H=224, W=224, augment=True,
+                 emotion_map=None, exclude_negative=True, face_align=True):
+        self.root_dir = root_dir
+        self.T = T
+        self.H = H
+        self.W = W
+        self.augment = augment
+        self.face_align = face_align
+
+        # SAMM emotion mapping
+        default_map = {1: 0, 2: 1, 3: 2, 4: 3, 5: 2, 6: 2, 7: 4}
+        self.emotion_map = emotion_map or default_map
+
+        # Find SAMM directory
+        self.samm_dir = root_dir
+        for candidate in [os.path.join(root_dir, 'SAMM'), root_dir]:
+            if os.path.exists(candidate):
+                self.samm_dir = candidate
+                break
+
+        # Build sample list from directory structure
+        self.samples = self._build_samples()
+        if exclude_negative:
+            self.samples = [s for s in self.samples if s['me_label'] >= 0]
+
+        self.subjects = sorted(set(s['subject'] for s in self.samples))
+
+        self.mean = torch.tensor(DATA_CONFIG['normalize_mean']).view(3, 1, 1, 1)
+        self.std = torch.tensor(DATA_CONFIG['normalize_std']).view(3, 1, 1, 1)
+
+        print(f"[SAMMFrameDataset] {len(self.samples)} samples, {len(self.subjects)} subjects")
+
+    def _build_samples(self):
+        samples = []
+        for subject_dir in sorted(os.listdir(self.samm_dir)):
+            subject_path = os.path.join(self.samm_dir, subject_dir)
+            if not os.path.isdir(subject_path):
+                continue
+            # Skip non-subject directories
+            if not subject_dir.replace('_', '').isdigit():
+                continue
+
+            for sample_dir in sorted(os.listdir(subject_path)):
+                sample_path = os.path.join(subject_path, sample_dir)
+                if not os.path.isdir(sample_path):
+                    continue
+
+                # Parse: {subject}_{AU}_{emotion}
+                parts = sample_dir.split('_')
+                if len(parts) < 3:
+                    continue
+                try:
+                    emotion_code = int(parts[-1])
+                except ValueError:
+                    continue
+
+                me_label = self.emotion_map.get(emotion_code, -1)
+
+                frame_files = sorted([f for f in os.listdir(sample_path)
+                                      if f.endswith('.jpg') or f.endswith('.bmp')])
+                if len(frame_files) == 0:
+                    continue
+
+                samples.append({
+                    'path': sample_path,
+                    'subject': subject_dir,
+                    'me_label': me_label,
+                    'emotion_code': emotion_code,
+                    'num_frames': len(frame_files),
+                })
+        return samples
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
+        frame_dir = sample['path']
+        frame_files = sorted([f for f in os.listdir(frame_dir)
+                              if f.endswith('.jpg') or f.endswith('.bmp')])
+        frames = []
+        for ff in frame_files:
+            frame = cv2.imread(os.path.join(frame_dir, ff))
+            if frame is not None:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frames.append(frame)
+        if len(frames) == 0:
+            frames = np.zeros((self.T, self.H, self.W, 3), dtype=np.uint8)
+        frames = np.stack(frames, axis=0)
+
+        # Sample T frames
+        total = len(frames)
+        T = self.T
+        if total <= T:
+            indices = np.arange(T) % total
+            frames = frames[indices]
+        else:
+            apex_idx = total // 2
+            n_before = int(T * 0.4)
+            n_apex = max(1, T - 2 * n_before)
+            n_after = T - n_before - n_apex
+            before = np.linspace(0, apex_idx, n_before + 1).astype(int)[:n_before]
+            at_apex = np.full(n_apex, apex_idx, dtype=int)
+            after = np.linspace(apex_idx, total - 1, n_after + 1).astype(int)[1:n_after + 1]
+            indices = np.concatenate([before, at_apex, after])
+            indices = indices[:T]
+            indices = np.clip(indices, 0, total - 1)
+            frames = frames[indices]
+
+        # Resize + align
+        if self.face_align:
+            frames = align_face_sequence(frames, target_size=(self.W, self.H))
+        else:
+            frames = np.stack([cv2.resize(f, (self.W, self.H)) for f in frames], axis=0)
+
+        # To tensor
+        frames_tensor = torch.from_numpy(frames).float() / 255.0
+        frames_tensor = frames_tensor.permute(3, 0, 1, 2)
+        frames_tensor = (frames_tensor - self.mean) / self.std
+
+        if self.augment:
+            if random.random() < 0.5:
+                frames_tensor = frames_tensor.flip(-1)
+
+        return {
+            'frames': frames_tensor,
+            'me_label': sample['me_label'],
+            'au_label': torch.zeros(28, dtype=torch.float32),
+            'subject': sample['subject'],
+        }
+
+    def get_subject(self, idx):
+        return self.samples[idx]['subject']

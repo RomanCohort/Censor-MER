@@ -16,6 +16,7 @@ import csv
 import argparse
 import time
 import random
+import math
 import numpy as np
 from collections import defaultdict
 from pathlib import Path
@@ -137,6 +138,80 @@ class SupConLoss(nn.Module):
         return loss
 
 
+class ArcFaceLoss(nn.Module):
+    """ArcFace: Additive Angular Margin Loss (Deng et al., 2019).
+
+    Enforces intra-class compactness and inter-class separation in cosine space
+    by adding an angular margin to the target logit. Critical for small datasets
+    where class boundaries easily collapse.
+
+    Loss = -log(exp(s * cos(theta_yi + m)) / (exp(s * cos(theta_yi + m)) + sum_{j!=y} exp(s * cos(theta_j))))
+
+    Args:
+        in_features: Feature dimension (e.g. 1024 for fused_feat)
+        out_features: Number of classes (e.g. 4)
+        margin: Angular margin m (0.2 typical, 0.5 aggressive)
+        scale: Scaling factor s (30.0 typical)
+    """
+    def __init__(self, in_features, out_features, margin=0.2, scale=30.0):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.margin = margin
+        self.scale = scale
+        # Learnable class centers
+        self.weight = nn.Parameter(torch.FloatTensor(out_features, in_features))
+        nn.init.xavier_uniform_(self.weight)
+
+        # Precompute constants
+        self.cos_m = math.cos(margin)
+        self.sin_m = math.sin(margin)
+        self.threshold = math.cos(math.pi - margin)
+        self.mm = math.sin(math.pi - margin) * margin
+
+    def forward(self, features, labels):
+        """
+        Args:
+            features: (B, D) feature vectors (will be L2-normalized)
+            labels: (B,) class labels
+        Returns:
+            loss: scalar ArcFace loss
+        """
+        # L2 normalize features and weights
+        features = nn.functional.normalize(features, dim=1)
+        weight = nn.functional.normalize(self.weight, dim=1)
+
+        # Cosine similarity: (B, num_classes)
+        cosine = nn.functional.linear(features, weight)
+        # Clamp for numerical safety
+        cosine = cosine.clamp(-1.0 + 1e-7, 1.0 - 1e-7)
+
+        # Sine from cosine
+        sine = torch.sqrt(1.0 - cosine ** 2)
+
+        # cos(theta + m) = cos(theta)*cos(m) - sin(theta)*sin(m)
+        cos_theta_plus_m = cosine * self.cos_m - sine * self.sin_m
+
+        # Only apply margin to target class
+        one_hot = nn.functional.one_hot(labels, self.out_features).float()
+
+        # Handle theta + m > pi: use linear approximation
+        output = torch.where(
+            cosine > self.threshold,
+            cos_theta_plus_m,
+            cosine - self.mm
+        )
+
+        # Combine: target class gets margin, others stay as-is
+        final_cosine = one_hot * output + (1.0 - one_hot) * cosine
+
+        # Scale and compute cross-entropy
+        logits = self.scale * final_cosine
+        loss = nn.functional.cross_entropy(logits, labels)
+
+        return loss
+
+
 def mixup_data(x, y_me, y_au, alpha=0.2):
     """MixUp data augmentation: linearly interpolate pairs of samples.
 
@@ -161,6 +236,35 @@ def mixup_data(x, y_me, y_au, alpha=0.2):
     y_au_a, y_au_b = y_au, y_au[index]
 
     return mixed_x, y_me_a, y_me_b, y_au_a, y_au_b, lam
+
+
+def manifold_mixup(feat, y_me, y_au, alpha=0.2):
+    """Manifold MixUp: interpolate in feature space instead of pixel space.
+
+    More suitable for micro-expression videos where pixel-level mixing
+    can destroy subtle temporal facial changes.
+
+    Args:
+        feat: (B, D) feature tensor (e.g. fused features from fusion layer)
+        y_me: (B,) ME labels
+        y_au: (B, 28) AU labels
+        alpha: Beta distribution parameter (0 = disabled)
+
+    Returns:
+        mixed_feat, y_me_a, y_me_b, y_au_a, y_au_b, lam
+    """
+    if alpha <= 0:
+        return feat, y_me, y_me, y_au, y_au, 1.0
+
+    lam = np.random.beta(alpha, alpha)
+    batch_size = feat.size(0)
+    index = torch.randperm(batch_size, device=feat.device)
+
+    mixed_feat = lam * feat + (1 - lam) * feat[index]
+    y_me_a, y_me_b = y_me, y_me[index]
+    y_au_a, y_au_b = y_au, y_au[index]
+
+    return mixed_feat, y_me_a, y_me_b, y_au_a, y_au_b, lam
 
 
 def compute_me_loss(me_logits, me_labels, label_smoothing=0.1):
@@ -409,6 +513,19 @@ class Trainer:
         # SupCon Loss
         self.supcon_loss = SupConLoss(temperature=0.07)
 
+        # ArcFace Loss (optional, replaces FocalLoss for ME classification)
+        self.use_arcface = args.use_arcface
+        if self.use_arcface:
+            self.arcface_loss = ArcFaceLoss(
+                in_features=1024,  # fused_feat dimension
+                out_features=4,    # 4-class ME
+                margin=args.arcface_margin,
+                scale=30.0,
+            )
+            # ArcFace weight must be on same device as model
+            self.arcface_loss = self.arcface_loss.to(device)
+            print(f"[Trainer] ArcFace enabled (margin={args.arcface_margin}, scale=30.0)")
+
         # CSV logger
         os.makedirs(args.output_dir, exist_ok=True)
         self.csv_logger = CSVLogger(os.path.join(args.output_dir, 'metrics.csv'))
@@ -423,35 +540,64 @@ class Trainer:
             me_labels = me_labels.to(self.device)
             au_labels = au_labels.to(self.device)
 
-            # MixUp augmentation
-            me_labels_b = None
-            au_labels_b = None
-            lam = 1.0
-            if self.args.mixup_alpha > 0:
-                videos, me_labels, me_labels_b, au_labels, au_labels_b, lam = mixup_data(
-                    videos, me_labels, au_labels, alpha=self.args.mixup_alpha
-                )
-
             # Only zero gradients at the start of accumulation cycle
             if batch_idx % accum_steps == 0:
                 self.optimizer.zero_grad()
 
+            # Manifold MixUp: mix in feature space, not pixel space
+            mixup_outputs = None
+            mixup_lam = 1.0
+
             if self.use_amp:
                 with torch.cuda.amp.autocast():
                     outputs = self.model(videos)
+
+                    # Apply Manifold MixUp on fused features
+                    if self.args.mixup_alpha > 0 and 'adapted_feat' in outputs:
+                        mixed_feat, me_a, me_b, au_a, au_b, lam = manifold_mixup(
+                            outputs['adapted_feat'], me_labels, au_labels,
+                            alpha=self.args.mixup_alpha
+                        )
+                        if lam < 1.0:
+                            mixup_lam = lam
+                            me_logits_mix, _, _ = self.model.moe(mixed_feat)
+                            au_intensities_mix, _ = self.model.au_decoder(mixed_feat)
+                            mixup_outputs = {
+                                'me_logits': me_logits_mix,
+                                'au_intensities': au_intensities_mix,
+                                'me_labels_b': me_b,
+                                'au_labels_b': au_b,
+                            }
+
                     total_loss = self._compute_loss(
                         outputs, me_labels, au_labels,
-                        me_labels_b, au_labels_b, lam
+                        mixup_outputs=mixup_outputs, mixup_lam=mixup_lam
                     )
-                    # Scale loss for gradient accumulation
                     total_loss = total_loss / accum_steps
             else:
                 outputs = self.model(videos)
+
+                # Apply Manifold MixUp on fused features
+                if self.args.mixup_alpha > 0 and 'adapted_feat' in outputs:
+                    mixed_feat, me_a, me_b, au_a, au_b, lam = manifold_mixup(
+                        outputs['adapted_feat'], me_labels, au_labels,
+                        alpha=self.args.mixup_alpha
+                    )
+                    if lam < 1.0:
+                        mixup_lam = lam
+                        me_logits_mix, _, _ = self.model.moe(mixed_feat)
+                        au_intensities_mix, _ = self.model.au_decoder(mixed_feat)
+                        mixup_outputs = {
+                            'me_logits': me_logits_mix,
+                            'au_intensities': au_intensities_mix,
+                            'me_labels_b': me_b,
+                            'au_labels_b': au_b,
+                        }
+
                 total_loss = self._compute_loss(
                     outputs, me_labels, au_labels,
-                    me_labels_b, au_labels_b, lam
+                    mixup_outputs=mixup_outputs, mixup_lam=mixup_lam
                 )
-                # Scale loss for gradient accumulation
                 total_loss = total_loss / accum_steps
 
             # BioMoE feedback
@@ -506,22 +652,33 @@ class Trainer:
         return metrics
 
     def _compute_loss(self, outputs, me_labels, au_labels,
-                      me_labels_b=None, au_labels_b=None, lam=1.0):
-        loss_me = compute_me_loss(outputs['me_logits'], me_labels,
-                                  label_smoothing=self.args.label_smoothing)
+                      mixup_outputs=None, mixup_lam=1.0):
+        # ME classification loss: ArcFace (on adapted_feat) or FocalLoss (on logits)
+        if self.use_arcface and 'adapted_feat' in outputs:
+            loss_me = self.arcface_loss(outputs['adapted_feat'], me_labels)
+        else:
+            loss_me = compute_me_loss(outputs['me_logits'], me_labels,
+                                      label_smoothing=self.args.label_smoothing)
         loss_au = compute_au_loss(outputs['au_intensities'], au_labels)
         loss_landmark = compute_landmark_loss(outputs['au_intensities'], au_labels)
         loss_moe = outputs['moe_aux_loss']
 
-        # MixUp: blend losses from both labels
-        if lam < 1.0 and me_labels_b is not None:
-            loss_me_b = compute_me_loss(outputs['me_logits'], me_labels_b,
-                                        label_smoothing=self.args.label_smoothing)
-            loss_au_b = compute_au_loss(outputs['au_intensities'], au_labels_b)
-            loss_landmark_b = compute_landmark_loss(outputs['au_intensities'], au_labels_b)
-            loss_me = lam * loss_me + (1 - lam) * loss_me_b
-            loss_au = lam * loss_au + (1 - lam) * loss_au_b
-            loss_landmark = lam * loss_landmark + (1 - lam) * loss_landmark_b
+        # Manifold MixUp: blend losses from mixed head outputs
+        if mixup_outputs is not None and mixup_lam < 1.0:
+            me_labels_b = mixup_outputs['me_labels_b']
+            au_labels_b = mixup_outputs['au_labels_b']
+            if self.use_arcface and 'adapted_feat' in outputs:
+                # For ArcFace MixUp, we need the mixed features
+                # The mixed_feat was already computed in train_epoch
+                # We use FocalLoss for the mixed branch (ArcFace on mixed feat is tricky)
+                loss_me_b = compute_me_loss(mixup_outputs['me_logits'], me_labels_b,
+                                            label_smoothing=self.args.label_smoothing)
+            else:
+                loss_me_b = compute_me_loss(mixup_outputs['me_logits'], me_labels_b,
+                                            label_smoothing=self.args.label_smoothing)
+            loss_au_b = compute_au_loss(mixup_outputs['au_intensities'], au_labels_b)
+            loss_me = mixup_lam * loss_me + (1 - mixup_lam) * loss_me_b
+            loss_au = mixup_lam * loss_au + (1 - mixup_lam) * loss_au_b
 
         # SupCon loss on fused features
         loss_supcon = torch.tensor(0.0, device=me_labels.device)
@@ -706,7 +863,7 @@ def parse_args():
                         help='Supervised contrastive loss weight (0 to disable)')
 
     # EMA
-    parser.add_argument('--ema_decay', type=float, default=0.999,
+    parser.add_argument('--ema_decay', type=float, default=0,
                         help='EMA decay (0 to disable, 0.999 typical)')
 
     # MixUp
@@ -758,6 +915,16 @@ def parse_args():
     parser.add_argument('--resume', type=str, default=None,
                         help='Path to checkpoint to resume from')
 
+    # Sparse Control (disabled by default -- caused accuracy drop)
+    parser.add_argument('--enable_sparse_control', action='store_true',
+                        help='Enable Long-Term Memory Sparse Control (off by default)')
+
+    # ArcFace loss
+    parser.add_argument('--use_arcface', action='store_true',
+                        help='Use ArcFace angular margin loss instead of FocalLoss for ME classification')
+    parser.add_argument('--arcface_margin', type=float, default=0.2,
+                        help='ArcFace angular margin (0.2 typical, 0.5 aggressive)')
+
     return parser.parse_args()
 
 
@@ -775,7 +942,12 @@ def train_single_fold(args, fold_idx, loso_subjects=None):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Model
-    model = Censor(fast_preprocess=True, diff_mode=args.diff_mode, verbose=False)
+    model = Censor(
+        fast_preprocess=True,
+        diff_mode=args.diff_mode,
+        verbose=False,
+        enable_sparse_control=args.enable_sparse_control
+    )
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
@@ -856,7 +1028,8 @@ if __name__ == '__main__':
     if args.synthetic_data:
         # Synthetic data test
         print("\nUsing synthetic data for testing...")
-        model = Censor(fast_preprocess=True, verbose=False)
+        model = Censor(fast_preprocess=True, verbose=False,
+                       enable_sparse_control=args.enable_sparse_control)
         train_dataset = SyntheticMERDataset(num_samples=100, T=args.T, H=args.H, W=args.W)
         val_dataset = SyntheticMERDataset(num_samples=20, T=args.T, H=args.H, W=args.W)
         train_loader = DataLoader(train_dataset, batch_size=args.batch_size,

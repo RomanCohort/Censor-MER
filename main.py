@@ -75,12 +75,15 @@ class Censor(nn.Module):
           -> EmotionReporter: Structured clinical reports
     """
 
-    def __init__(self, fast_preprocess=False, diff_mode=False, verbose=True):
+    def __init__(self, fast_preprocess=False, diff_mode=False, verbose=True,
+                 enable_sparse_control=False, return_features=False):
         super().__init__()
 
         self.fast_preprocess = fast_preprocess
         self.diff_mode = diff_mode
         self.verbose = verbose
+        self.enable_sparse_control = enable_sparse_control
+        self.return_features = return_features
 
         # =====================================================================
         # Stage 1: Biomimetic Preprocessing
@@ -118,15 +121,17 @@ class Censor(nn.Module):
         # =====================================================================
         # Stage 4.5: Long-Term Memory Sparse Control (Multi-Stage)
         # =====================================================================
-        print("[Censor] Initializing Sparse Control Wrapper...")
-        # Define sparse control points for all stages
-        self.sparse_control = SparseControlWrapper({
-            'fast_path': 512,          # FastPath output
-            'slow_path': 768,          # SlowPath output
-            'fusion': 1024,           # Fusion output
-            'moe_coarse': 3,          # MoE coarse experts (groups)
-            'moe_fine': 9,            # MoE fine experts (total)
-        })
+        if enable_sparse_control:
+            print("[Censor] Initializing Sparse Control Wrapper...")
+            self.sparse_control = SparseControlWrapper({
+                'fast_path': 512,          # FastPath output
+                'slow_path': 768,          # SlowPath output
+                'fusion': 1024,           # Fusion output
+                'moe_coarse': 3,          # MoE coarse experts (groups)
+                'moe_fine': 9,            # MoE fine experts (total)
+            })
+        else:
+            self.sparse_control = None
 
         # =====================================================================
         # Stage 5: Dynamic AU Decoder
@@ -255,15 +260,17 @@ class Censor(nn.Module):
         # =====================================================================
         # Stage 2.5: Sparse Control for Pathways
         # =====================================================================
-        if self.verbose: print(f"\n--- Stage 2.5: Sparse Control (Pathways) ---")
-        pathway_feats = {'fast_path': fast_feat, 'slow_path': slow_feat}
-        pathway_feats, pathway_stats = self.sparse_control(pathway_feats)
-        fast_feat = pathway_feats['fast_path']
-        slow_feat = pathway_feats['slow_path']
-        # Log stats for each pathway
-        for name, stats in pathway_stats.items():
-            if stats:
-                if self.verbose: print(f"[Sparse-{name}] frozen={stats.get('frozen_ratio', 0):.3f}, usage={stats.get('usage_ratio', 0):.3f}")
+        if self.enable_sparse_control and self.sparse_control is not None:
+            if self.verbose: print(f"\n--- Stage 2.5: Sparse Control (Pathways) ---")
+            pathway_feats = {'fast_path': fast_feat, 'slow_path': slow_feat}
+            pathway_feats, pathway_stats = self.sparse_control(pathway_feats)
+            fast_feat = pathway_feats['fast_path']
+            slow_feat = pathway_feats['slow_path']
+            for name, stats in pathway_stats.items():
+                if stats:
+                    if self.verbose: print(f"[Sparse-{name}] frozen={stats.get('frozen_ratio', 0):.3f}, usage={stats.get('usage_ratio', 0):.3f}")
+        else:
+            pathway_stats = {}
 
         # =====================================================================
         # Stage 3: Attention Modulation

@@ -1,550 +1,1000 @@
 """
-Censor -- Cross-Dataset Pretrain + Finetune Pipeline
-=====================================================
-Strategy:
-  1. Pretrain on CASME2 (largest AU annotations, onset/apex/offset)
-  2. Finetune on SMIC-HS + SAMM (transfer biomimetic features)
+Censor -- Multi-Dataset Joint Pretrain + Fine-tune
+====================================================
+SOTA training pipeline for micro-expression recognition.
 
-Key design:
-  - Unified 4-class label space: happiness(0), surprise(1), disgust(2), repression(3)
-  - Load pretrained backbone, replace MoE head for new dataset
-  - Freeze backbone first N epochs, then unfreeze with lower LR
-  - LOSO cross-validation on target dataset
+Strategy:
+  Phase 1: Joint pretrain on CASME2 + SMIC + SAMM (unified 5-class)
+  Phase 2: Fine-tune on target dataset (CASME2 LOSO)
+
+Key SOTA techniques:
+  - ArcFace angular margin loss
+  - Manifold MixUp in feature space
+  - Supervised Contrastive (SupCon) loss
+  - LOSO (Leave-One-Subject-Out) evaluation
+  - Differential LR (backbone 10x smaller than head)
+  - Warmup + Cosine annealing scheduler
+  - Gradient accumulation for effective larger batch
 
 Usage:
-  # Step 1: Pretrain on CASME2
-  python train_cross.py --stage pretrain --data_root /root/autodl-tmp/data/CASME2
+  # Phase 1: Joint pretrain (all 3 datasets)
+  python train_cross.py --phase pretrain \
+      --casme_root /root/autodl-tmp/data/CASME2 \
+      --smic_root /root/autodl-tmp/data/SMIC \
+      --samm_root /root/autodl-tmp/data/SAMM \
+      --use_arcface --arcface_margin 0.2 \
+      --mixup_alpha 0.2 --supcon_weight 0.1
 
-  # Step 2: Finetune on SMIC
-  python train_cross.py --stage finetune \
-    --data_root /root/autodl-tmp/data/SMIC_all_cropped \
-    --dataset smic \
-    --pretrained /root/autodl-tmp/checkpoints/pretrain_best.pth
+  # Phase 2: Fine-tune on CASME2 with LOSO
+  python train_cross.py --phase finetune \
+      --casme_root /root/autodl-tmp/data/CASME2 \
+      --pretrained pretrained_joint_best.pth \
+      --loso --use_arcface --lr 1e-4
 
-  # Step 3: Finetune on SAMM
-  python train_cross.py --stage finetune \
-    --data_root /root/autodl-tmp/data/SAMM \
-    --dataset samm \
-    --pretrained /root/autodl-tmp/checkpoints/pretrain_best.pth
+  # Phase 2 alt: Fine-tune on SMIC
+  python train_cross.py --phase finetune \
+      --smic_root /root/autodl-tmp/data/SMIC \
+      --pretrained pretrained_joint_best.pth \
+      --use_arcface --lr 1e-4
 """
 
 import os
 import sys
 import csv
-import random
 import argparse
 import time
+import random
+import math
 import numpy as np
-from collections import defaultdict
+from pathlib import Path
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, ConcatDataset
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, str(Path(__file__).parent))
 
-from main import Censor
-from config.defaults import MOE_CONFIG
-from dataset_frames import FrameSequenceDataset, get_casme2_dataloaders, get_loso_subjects
-from dataset_smic import SMICDataset, get_smic_dataloaders, get_smic_subjects
-from dataset_samm import SAMMDataset, get_samm_dataloaders, get_samm_subjects
-from dataset_samm import SAMMDataset, get_samm_dataloaders, get_samm_subjects
-from train_frames import (
-    FocalLoss, compute_me_loss, compute_au_loss,
-    MetricsTracker, compute_landmark_loss
+from config.defaults import (
+    INPUT_CONFIG, FAST_PATHWAY_CONFIG, SLOW_PATHWAY_CONFIG,
+    AMYGDALA_CONFIG, FFA_CONFIG, CASA_CONFIG, FUSION_CONFIG,
+    AU_DECODER_CONFIG, MOE_CONFIG, RADAR_CONFIG,
 )
+from main import Censor
+from dataset_frames import CASME2FrameDataset, SMICFrameDataset, SAMMFrameDataset
+from train_frames import compute_me_loss, compute_au_loss, compute_landmark_loss
 
 
 # =============================================================================
-# Unified Label Mapping (4-class)
+# Unified 5-class emotion mapping (CASME2 + SMIC + SAMM compatible)
 # =============================================================================
-# All datasets map to: happiness(0), surprise(1), disgust(2), repression(3)
-# Samples that don't fit these 4 classes are excluded.
+# CASME2: happiness(0), surprise(1), disgust(2), fear(3), repression(4), others(-1)
+# SMIC:   happiness(0), surprise(1), disgust(2), fear(3), others(-1)
+# SAMM:   happiness(0), surprise(1), disgust(2), fear(3), anger(4), contempt(5), others(-1)
+# Unified 5-class: happiness(0), surprise(1), disgust(2), fear(3), anger(4)
+# "others", "repression", "contempt" are excluded from training
 
-UNIFIED_CLASSES = 4
-UNIFIED_NAMES = ['happiness', 'surprise', 'disgust', 'repression']
-
-# SMIC -> unified: positive=happiness, negative=disgust, surprise=surprise
-SMIC_TO_UNIFIED = {
-    'positive': 0,   # happiness
-    'negative': 2,   # disgust
-    'surprise': 1,   # surprise
+UNIFIED_EMOTION_MAP = {
+    'happiness': 0,
+    'surprise': 1,
+    'disgust': 2,
+    'fear': 3,
+    'anger': 4,
+    # Excluded:
+    'sadness': -1,
+    'contempt': -1,
+    'repression': -1,
+    'others': -1,
+    'other': -1,
 }
 
-# SAMM -> unified (SAMM has more fine-grained labels)
-SAMM_TO_UNIFIED = {
-    'Happiness': 0,
-    'Surprise': 1,
-    'Disgust': 2,
-    'Contempt': 2,      # merge into disgust
-    'Fear': 2,          # merge into disgust
-    'Sadness': 2,       # merge into disgust
-    'Anger': 2,         # merge into disgust
-    'Repression': 3,
-    # 'Other' excluded
-}
+NUM_UNIFIED_CLASSES = 5
 
 
 # =============================================================================
-# Model Utilities for Transfer Learning
+# Loss Functions
 # =============================================================================
 
-def load_pretrained_backbone(model, pretrained_path):
+class SupConLoss(nn.Module):
+    """Supervised Contrastive Loss (Khosla et al., 2020)."""
+    def __init__(self, temperature=0.07):
+        super().__init__()
+        self.temperature = temperature
+
+    def forward(self, features, labels):
+        device = features.device
+        B = features.shape[0]
+        if B < 2:
+            return torch.tensor(0.0, device=device)
+
+        features = F.normalize(features, dim=1)
+        sim = torch.matmul(features, features.T) / self.temperature
+
+        labels = labels.view(-1, 1)
+        mask = (labels == labels.T).float()
+        logits_mask = torch.ones_like(mask) - torch.eye(B, device=device)
+        mask = mask * logits_mask
+
+        logits_max, _ = sim.max(dim=1, keepdim=True)
+        sim = sim - logits_max.detach()
+
+        exp_sim = torch.exp(sim) * logits_mask
+        log_prob = sim - torch.log(exp_sim.sum(dim=1, keepdim=True) + 1e-8)
+
+        pos_per_sample = mask.sum(dim=1)
+        has_pos = pos_per_sample > 0
+        if has_pos.sum() == 0:
+            return torch.tensor(0.0, device=device)
+
+        mean_log_prob = (mask * log_prob).sum(dim=1) / (pos_per_sample + 1e-8)
+        loss = -mean_log_prob[has_pos].mean()
+        return loss
+
+
+class ArcFaceLoss(nn.Module):
+    """ArcFace: Additive Angular Margin Loss (Deng et al., 2019)."""
+    def __init__(self, in_features, out_features, margin=0.2, scale=30.0):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.margin = margin
+        self.scale = scale
+        self.weight = nn.Parameter(torch.FloatTensor(out_features, in_features))
+        nn.init.xavier_uniform_(self.weight)
+
+        self.cos_m = math.cos(margin)
+        self.sin_m = math.sin(margin)
+        self.threshold = math.cos(math.pi - margin)
+        self.mm = math.sin(math.pi - margin) * margin
+
+    def forward(self, features, labels):
+        features = F.normalize(features, dim=1)
+        weight = F.normalize(self.weight, dim=1)
+        cosine = F.linear(features, weight)
+        cosine = cosine.clamp(-1.0 + 1e-7, 1.0 - 1e-7)
+
+        sine = torch.sqrt(1.0 - cosine ** 2)
+        cos_theta_plus_m = cosine * self.cos_m - sine * self.sin_m
+
+        one_hot = F.one_hot(labels, self.out_features).float()
+
+        output = torch.where(
+            cosine > self.threshold,
+            cos_theta_plus_m,
+            cosine - self.mm
+        )
+
+        final_cosine = one_hot * output + (1.0 - one_hot) * cosine
+        logits = self.scale * final_cosine
+        loss = F.cross_entropy(logits, labels)
+        return loss
+
+
+# =============================================================================
+# Manifold MixUp
+# =============================================================================
+
+def manifold_mixup(feat, y_me, y_au, alpha=0.2):
+    """Feature-space MixUp. Preserves micro-expression signals better than pixel-level."""
+    if alpha <= 0:
+        return feat, y_me, y_me, y_au, y_au, 1.0
+    lam = np.random.beta(alpha, alpha)
+    batch_size = feat.size(0)
+    index = torch.randperm(batch_size, device=feat.device)
+    mixed_feat = lam * feat + (1 - lam) * feat[index]
+    y_me_a, y_me_b = y_me, y_me[index]
+    y_au_a, y_au_b = y_au, y_au[index]
+    return mixed_feat, y_me_a, y_me_b, y_au_a, y_au_b, lam
+
+
+# =============================================================================
+# Multi-Dataset Trainer
+# =============================================================================
+
+class CrossDatasetTrainer:
     """
-    Load pretrained weights into model, handling head mismatch.
+    Multi-dataset joint pretrain + fine-tune trainer.
 
-    Strategy: load all matching keys, skip MoE head (different num_classes).
-    This preserves: preprocessing, dual-pathway backbones, attention, fusion, AU decoder.
+    Phase 1 (pretrain): CASME2 + SMIC + SAMM joint training, unified 5-class
+    Phase 2 (finetune): Single dataset fine-tuning, LOSO or random split
     """
-    ckpt = torch.load(pretrained_path, map_location='cpu')
-    state_dict = ckpt.get('model_state_dict', ckpt)
 
-    model_dict = model.state_dict()
-    loaded_keys = []
-    skipped_keys = []
+    def __init__(self, args):
+        self.args = args
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.phase = args.phase  # 'pretrain' or 'finetune'
 
-    for key, value in state_dict.items():
-        if key in model_dict:
-            if value.shape == model_dict[key].shape:
-                model_dict[key] = value
-                loaded_keys.append(key)
-            else:
-                skipped_keys.append(f"{key}: shape mismatch {value.shape} vs {model_dict[key].shape}")
+        # Build model
+        print(f"\n[Censor] Building model (phase={self.phase})...")
+        self.model = Censor(
+            fast_preprocess=True,
+            diff_mode=True,
+            verbose=False,
+            enable_sparse_control=False,
+        ).to(self.device)
+
+        # Adjust MoE head for unified 5-class if pretraining
+        if self.phase == 'pretrain':
+            self._adjust_moe_for_classes(NUM_UNIFIED_CLASSES)
+
+        # ArcFace
+        self.use_arcface = args.use_arcface
+        if self.use_arcface:
+            num_cls = NUM_UNIFIED_CLASSES if self.phase == 'pretrain' else 4
+            self.arcface_loss = ArcFaceLoss(
+                in_features=1024,
+                out_features=num_cls,
+                margin=args.arcface_margin,
+                scale=30.0,
+            ).to(self.device)
+            print(f"[Trainer] ArcFace enabled (margin={args.arcface_margin}, classes={num_cls})")
+
+        # SupCon
+        self.supcon_loss = SupConLoss(temperature=0.07)
+
+        # Loss weights
+        self.loss_weights = {
+            'me': 1.0,
+            'au': 0.1,
+            'moe': 0.01,
+            'landmark': 0.05,
+            'supcon': args.supcon_weight,
+            'arcface': args.arcface_weight,
+        }
+
+        # Load pretrained checkpoint for finetune
+        if self.phase == 'finetune' and args.pretrained:
+            self._load_pretrained(args.pretrained)
+
+        # Optimizer with differential LR
+        self._setup_optimizer()
+
+        # Datasets
+        self._setup_datasets()
+
+        # Scheduler
+        self._setup_scheduler()
+
+        # Best tracking
+        self.best_acc = 0.0
+        self.best_f1 = 0.0
+        self.patience_counter = 0
+
+        # CSV logger
+        csv_path = args.log_dir or './logs'
+        os.makedirs(csv_path, exist_ok=True)
+        phase_tag = 'pretrain' if self.phase == 'pretrain' else 'finetune'
+        self.csv_file = open(os.path.join(csv_path, f'{phase_tag}_log.csv'), 'w', newline='')
+        self.csv_writer = csv.writer(self.csv_file)
+        self.csv_writer.writerow([
+            'epoch', 'train_loss', 'val_loss', 'val_acc', 'val_f1',
+            'lr', 'phase'
+        ])
+
+    def _adjust_moe_for_classes(self, num_classes):
+        """Adjust MoE head output for different number of classes."""
+        moe = self.model.moe
+        # Reinitialize the expert heads for new class count
+        for expert in moe.experts:
+            old_linear = expert[-1]  # Last layer is Linear
+            new_linear = nn.Linear(old_linear.in_features, num_classes).to(self.device)
+            nn.init.xavier_uniform_(new_linear.weight)
+            expert[-1] = new_linear
+        # Reinitialize gating network
+        old_gate = moe.gate
+        moe.gate = nn.Sequential(
+            nn.Linear(moe.input_dim, moe.gating_hidden_dim),
+            nn.ReLU(),
+            nn.Linear(moe.gating_hidden_dim, moe.num_experts),
+        ).to(self.device)
+        print(f"[Censor] Adjusted MoE for {num_classes} classes")
+
+    def _load_pretrained(self, pretrained_path):
+        """Load pretrained weights for fine-tuning."""
+        print(f"[Trainer] Loading pretrained: {pretrained_path}")
+        ckpt = torch.load(pretrained_path, map_location=self.device)
+
+        # Handle different checkpoint formats
+        if 'model_state_dict' in ckpt:
+            state_dict = ckpt['model_state_dict']
+        elif 'state_dict' in ckpt:
+            state_dict = ckpt['state_dict']
         else:
-            skipped_keys.append(f"{key}: not in model")
+            state_dict = ckpt
 
-    model.load_state_dict(model_dict)
+        # Filter out mismatched keys (MoE head may have different num_classes)
+        model_dict = self.model.state_dict()
+        loaded_keys = []
+        skipped_keys = []
 
-    print(f"[Transfer] Loaded {len(loaded_keys)} / {len(state_dict)} parameters")
-    if skipped_keys:
-        print(f"[Transfer] Skipped {len(skipped_keys)} keys:")
-        for k in skipped_keys[:10]:
-            print(f"  - {k}")
-        if len(skipped_keys) > 10:
-            print(f"  ... and {len(skipped_keys) - 10} more")
+        for k, v in state_dict.items():
+            if k in model_dict:
+                if v.shape == model_dict[k].shape:
+                    model_dict[k] = v
+                    loaded_keys.append(k)
+                else:
+                    skipped_keys.append(f"{k}: {v.shape} vs {model_dict[k].shape}")
+            # Skip keys not in current model (e.g., arcface_loss.weight)
 
-    return model
+        self.model.load_state_dict(model_dict)
+        print(f"[Trainer] Loaded {len(loaded_keys)} params, skipped {len(skipped_keys)} shape mismatches")
+        if skipped_keys:
+            for s in skipped_keys[:5]:
+                print(f"  Skip: {s}")
 
-
-def freeze_backbone(model):
-    """Freeze dual-pathway backbones + preprocessing."""
-    frozen_count = 0
-    for name, param in model.named_parameters():
-        # Freeze: preprocessing, fast_pathway, slow_pathway
-        if any(k in name for k in ['saliency', 'rppg', 'flow',
-                                     'fast_pathway', 'slow_pathway']):
-            param.requires_grad = False
-            frozen_count += 1
-
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    total = sum(p.numel() for p in model.parameters())
-    print(f"[Freeze] Frozen {frozen_count} parameter tensors, "
-          f"trainable: {trainable:,} / {total:,}")
-
-
-def unfreeze_backbone(model):
-    """Unfreeze all parameters."""
-    for param in model.parameters():
-        param.requires_grad = True
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"[Unfreeze] All parameters trainable: {trainable:,}")
-
-
-# =============================================================================
-# Training Functions
-# =============================================================================
-
-def train_one_epoch(model, loader, optimizer, scaler, device, args, epoch):
-    model.train()
-    tracker = MetricsTracker()
-
-    for batch_idx, (videos, me_labels, au_labels) in enumerate(loader):
-        videos = videos.to(device)
-        me_labels = me_labels.to(device)
-        au_labels = au_labels.to(device)
-
-        optimizer.zero_grad()
-
-        with torch.cuda.amp.autocast():
-            outputs = model(videos)
-
-            me_loss = compute_me_loss(outputs['me_logits'], me_labels)
-            au_loss = compute_au_loss(outputs['au_intensities'], au_labels)
-            lm_loss = compute_landmark_loss(outputs['au_opd'])
-            moe_loss = outputs['moe_aux_loss']
-
-            total_loss = (me_loss
-                          + args.au_loss_weight * au_loss
-                          + args.landmark_loss_weight * lm_loss
-                          + args.moe_loss_weight * moe_loss)
-
-        scaler.scale(total_loss).backward()
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-        scaler.step(optimizer)
-        scaler.update()
-
-        # Track metrics
-        tracker.update_me(outputs['me_logits'].detach(), me_labels)
-        tracker.update_au(outputs['au_intensities'].detach(), au_labels)
-        tracker.losses['me'].append(me_loss.item())
-        tracker.losses['au'].append(au_loss.item())
-        tracker.losses['total'].append(total_loss.item())
-
-        if batch_idx % args.log_interval == 0:
-            print(f"  [{batch_idx}/{len(loader)}] "
-                  f"me: {me_loss.item():.4f} | au: {au_loss.item():.4f} | "
-                  f"total: {total_loss.item():.4f}")
-
-    return tracker
-
-
-@torch.no_grad()
-def validate(model, loader, device, args):
-    model.eval()
-    tracker = MetricsTracker()
-
-    for videos, me_labels, au_labels in loader:
-        videos = videos.to(device)
-        me_labels = me_labels.to(device)
-        au_labels = au_labels.to(device)
-
-        with torch.cuda.amp.autocast():
-            outputs = model(videos)
-
-        me_loss = compute_me_loss(outputs['me_logits'], me_labels)
-        au_loss = compute_au_loss(outputs['au_intensities'], au_labels)
-
-        tracker.update_me(outputs['me_logits'], me_labels)
-        tracker.update_au(outputs['au_intensities'], au_labels)
-        tracker.losses['me'].append(me_loss.item())
-        tracker.losses['au'].append(au_loss.item())
-
-    return tracker
-
-
-def get_dataloaders(args):
-    """Get dataloaders for the specified dataset."""
-    face_align = not args.no_face_align
-
-    if args.dataset == 'casme2':
-        return get_casme2_dataloaders(
-            data_root=args.data_root,
-            batch_size=args.batch_size,
-            T=args.T, H=args.H, W=args.W,
-            num_workers=args.num_workers,
-            face_align=face_align,
-            loso_fold=args.loso_fold if args.loso else None,
-        )
-    elif args.dataset == 'smic':
-        return get_smic_dataloaders(
-            data_root=args.data_root,
-            batch_size=args.batch_size,
-            T=args.T, H=args.H, W=args.W,
-            num_workers=args.num_workers,
-            face_align=face_align,
-            loso_fold=args.loso_fold if args.loso else None,
-        )
-    elif args.dataset == 'samm':
-        return get_samm_dataloaders(
-            data_root=args.data_root,
-            batch_size=args.batch_size,
-            T=args.T, H=args.H, W=args.W,
-            num_workers=args.num_workers,
-            face_align=face_align,
-            loso_fold=args.loso_fold if args.loso else None,
-        )
-    else:
-        raise ValueError(f"Unknown dataset: {args.dataset}")
-
-
-def run_training(args):
-    """Main training loop for pretrain or finetune."""
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Device: {device}")
-
-    # Build model
-    model = Censor(fast_preprocess=True, diff_mode=args.diff_mode, verbose=False)
-
-    # Load pretrained weights for finetune
-    if args.stage == 'finetune' and args.pretrained:
-        print(f"\n[Finetune] Loading pretrained weights from: {args.pretrained}")
-        model = load_pretrained_backbone(model, args.pretrained)
-
-        # Freeze backbone for finetune
-        if args.freeze_backbone:
-            freeze_backbone(model)
-    elif args.stage == 'pretrain' and args.freeze_backbone:
-        freeze_backbone(model)
-
-    model = model.to(device)
-
-    # Data
-    print(f"\nLoading {args.dataset} dataset...")
-    train_loader, val_loader = get_dataloaders(args)
-    print(f"Train: {len(train_loader)} batches, Val: {len(val_loader)} batches")
-
-    # Optimizer with different LR for backbone vs head
-    if args.stage == 'finetune':
-        # Lower LR for pretrained backbone, higher for new head
+    def _setup_optimizer(self):
+        """Differential LR: backbone 10x smaller than head."""
         backbone_params = []
         head_params = []
-        for name, param in model.named_parameters():
+
+        # Identify backbone vs head modules
+        backbone_names = {'fast_pathway', 'slow_pathway', 'saliency', 'rppg', 'flow'}
+        head_names = {'amygdala', 'ffa', 'casa', 'fusion', 'au_decoder', 'moe', 'radar'}
+
+        for name, param in self.model.named_parameters():
             if not param.requires_grad:
                 continue
-            if any(k in name for k in ['fast_pathway', 'slow_pathway',
-                                         'saliency', 'rppg', 'flow',
-                                         'amygdala', 'ffa', 'casa',
-                                         'fusion', 'sparse_control']):
+            if any(bn in name for bn in backbone_names):
                 backbone_params.append(param)
             else:
                 head_params.append(param)
 
-        optimizer = torch.optim.AdamW([
-            {'params': backbone_params, 'lr': args.lr / 10},  # 10x lower for backbone
-            {'params': head_params, 'lr': args.lr},
-        ], weight_decay=args.weight_decay)
-        print(f"[Finetune] Backbone LR: {args.lr/10:.2e}, Head LR: {args.lr:.2e}")
-    else:
-        optimizer = torch.optim.AdamW(
-            model.parameters(), lr=args.lr, weight_decay=args.weight_decay
+        lr = self.args.lr
+        backbone_lr = lr * self.args.backbone_lr_factor
+
+        param_groups = [
+            {'params': backbone_params, 'lr': backbone_lr, 'name': 'backbone'},
+            {'params': head_params, 'lr': lr, 'name': 'head'},
+        ]
+
+        # Add ArcFace params to head group
+        if self.use_arcface:
+            param_groups.append({
+                'params': self.arcface_loss.parameters(),
+                'lr': lr, 'name': 'arcface'
+            })
+
+        self.optimizer = torch.optim.AdamW(
+            param_groups,
+            weight_decay=self.args.weight_decay,
         )
 
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.epochs, eta_min=1e-6
-    )
-    scaler = torch.cuda.amp.GradScaler()
+        total_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        backbone_count = sum(p.numel() for p in backbone_params)
+        head_count = sum(p.numel() for p in head_params)
+        print(f"[Trainer] Total trainable: {total_params:,}")
+        print(f"[Trainer]   Backbone: {backbone_count:,} (lr={backbone_lr:.2e})")
+        print(f"[Trainer]   Head:     {head_count:,} (lr={lr:.2e})")
 
-    # Output dir
-    stage_dir = f"{args.stage}_{args.dataset}"
-    output_dir = os.path.join(args.output_dir, stage_dir)
-    os.makedirs(output_dir, exist_ok=True)
+    def _setup_datasets(self):
+        """Setup datasets for current phase."""
+        args = self.args
 
-    # Training loop
-    best_val_acc = 0.0
-    start_time = time.time()
+        if self.phase == 'pretrain':
+            # Joint pretrain: load all available datasets
+            datasets = []
 
-    for epoch in range(1, args.epochs + 1):
-        epoch_start = time.time()
+            if args.casme_root and os.path.exists(args.casme_root):
+                ds = CASME2FrameDataset(
+                    root_dir=args.casme_root,
+                    T=args.T, H=args.H, W=args.W,
+                    augment=True,
+                    emotion_map=UNIFIED_EMOTION_MAP,
+                    exclude_negative=True,  # Exclude "others" class
+                )
+                datasets.append(ds)
+                print(f"[Data] CASME2: {len(ds)} samples")
 
-        # Unfreeze backbone after freeze_epochs
-        if args.freeze_backbone and epoch == args.freeze_epochs + 1:
-            unfreeze_backbone(model)
-            # Re-create optimizer with differential LR
-            backbone_params = []
-            head_params = []
-            for name, param in model.named_parameters():
-                if any(k in name for k in ['fast_pathway', 'slow_pathway',
-                                             'saliency', 'rppg', 'flow',
-                                             'amygdala', 'ffa', 'casa',
-                                             'fusion', 'sparse_control']):
-                    backbone_params.append(param)
-                else:
-                    head_params.append(param)
+            if args.smic_root and os.path.exists(args.smic_root):
+                ds = SMICFrameDataset(
+                    root_dir=args.smic_root,
+                    T=args.T, H=args.H, W=args.W,
+                    augment=True,
+                    emotion_map=UNIFIED_EMOTION_MAP,
+                    exclude_negative=True,
+                )
+                datasets.append(ds)
+                print(f"[Data] SMIC: {len(ds)} samples")
 
-            optimizer = torch.optim.AdamW([
-                {'params': backbone_params, 'lr': args.lr / 10},
-                {'params': head_params, 'lr': args.lr},
-            ], weight_decay=args.weight_decay)
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=args.epochs - epoch, eta_min=1e-6
+            if args.samm_root and os.path.exists(args.samm_root):
+                ds = SAMMFrameDataset(
+                    root_dir=args.samm_root,
+                    T=args.T, H=args.H, W=args.W,
+                    augment=True,
+                    emotion_map=UNIFIED_EMOTION_MAP,
+                    exclude_negative=True,
+                )
+                datasets.append(ds)
+                print(f"[Data] SAMM: {len(ds)} samples")
+
+            if not datasets:
+                raise ValueError("No datasets found! Check --casme_root, --smic_root, --samm_root")
+
+            self.train_dataset = ConcatDataset(datasets)
+            total = len(self.train_dataset)
+            # 90/10 split for pretrain validation
+            val_size = max(1, int(total * 0.1))
+            train_size = total - val_size
+            self.train_dataset, self.val_dataset = torch.utils.data.random_split(
+                self.train_dataset, [train_size, val_size],
+                generator=torch.Generator().manual_seed(42)
             )
-            scaler = torch.cuda.amp.GradScaler()
+            print(f"[Data] Joint pretrain: {train_size} train, {val_size} val")
 
-        # Train
-        train_tracker = train_one_epoch(model, train_loader, optimizer, scaler, device, args, epoch)
+        elif self.phase == 'finetune':
+            # Fine-tune on single target dataset
+            target = args.target_dataset
 
-        # Validate
-        val_tracker = validate(model, val_loader, device, args)
+            if target == 'casme2':
+                DatasetClass = CASME2FrameDataset
+                root = args.casme_root
+            elif target == 'smic':
+                DatasetClass = SMICFrameDataset
+                root = args.smic_root
+            elif target == 'samm':
+                DatasetClass = SAMMFrameDataset
+                root = args.samm_root
+            else:
+                raise ValueError(f"Unknown target dataset: {target}")
 
-        # Scheduler step
-        scheduler.step()
+            if not root or not os.path.exists(root):
+                raise ValueError(f"Target dataset root not found: {root}")
 
-        epoch_time = time.time() - epoch_start
-        lr = optimizer.param_groups[-1]['lr']
+            full_dataset = DatasetClass(
+                root_dir=root,
+                T=args.T, H=args.H, W=args.W,
+                augment=True,
+            )
 
-        # Print epoch summary
-        print(f"\n  [Train] me: {np.mean(train_tracker.losses['me']):.4f} | "
-              f"au: {np.mean(train_tracker.losses['au']):.4f}")
-        print(f"  [Val]   me: {np.mean(val_tracker.losses['me']):.4f} | "
-              f"au: {np.mean(val_tracker.losses['au']):.4f}")
-        print(f"  [Val]   ME Acc: {val_tracker.me_accuracy:.4f} | "
-              f"ME F1: {val_tracker.me_f1:.4f} | AU F1: {val_tracker.au_f1:.4f}")
-        print(f"  LR: {lr:.2e} | Epoch time: {epoch_time:.1f}s")
+            if args.loso:
+                # LOSO: Leave-One-Subject-Out
+                self.loso_subjects = full_dataset.subjects if hasattr(full_dataset, 'subjects') else []
+                self.full_dataset = full_dataset
+                self.train_dataset = None  # Will be set per-fold
+                self.val_dataset = None
+                print(f"[Data] LOSO mode: {len(self.loso_subjects)} subjects")
+            else:
+                # Random 80/20 split
+                total = len(full_dataset)
+                val_size = max(1, int(total * 0.2))
+                train_size = total - val_size
+                self.train_dataset, self.val_dataset = torch.utils.data.random_split(
+                    full_dataset, [train_size, val_size],
+                    generator=torch.Generator().manual_seed(42)
+                )
+                print(f"[Data] Fine-tune: {train_size} train, {val_size} val")
 
-        # Save best
-        if val_tracker.me_accuracy > best_val_acc:
-            best_val_acc = val_tracker.me_accuracy
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'metrics': {
-                    'me_accuracy': val_tracker.me_accuracy,
-                    'me_f1': val_tracker.me_f1,
-                    'au_f1': val_tracker.au_f1,
-                },
-                'args': vars(args),
-            }, os.path.join(output_dir, f'{args.stage}_best.pth'))
-            print(f"  ** New best: {best_val_acc:.4f} **")
+        self.train_loader = DataLoader(
+            self.train_dataset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=args.num_workers,
+            pin_memory=True,
+            drop_last=True,
+        ) if self.train_dataset else None
 
-        # Periodic checkpoint
-        if epoch % args.save_every == 0:
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'metrics': {
-                    'me_accuracy': val_tracker.me_accuracy,
-                    'me_f1': val_tracker.me_f1,
-                    'au_f1': val_tracker.au_f1,
-                },
-            }, os.path.join(output_dir, f'checkpoint_epoch_{epoch}.pth'))
+        self.val_loader = DataLoader(
+            self.val_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=True,
+        ) if self.val_dataset else None
 
-    total_time = time.time() - start_time
-    print(f"\n{'='*60}")
-    print(f" {args.stage.upper()} on {args.dataset} completed")
-    print(f" Time: {total_time:.1f}s ({total_time/60:.1f} min)")
-    print(f" Best Val Acc: {best_val_acc:.4f}")
-    print(f" Checkpoints: {output_dir}")
-    print(f"{'='*60}")
+    def _setup_scheduler(self):
+        """Warmup + Cosine annealing scheduler."""
+        total_steps = len(self.train_loader) * self.args.epochs
+        warmup_steps = min(self.args.warmup_epochs * len(self.train_loader), total_steps // 10)
 
-    return best_val_acc
+        # Linear warmup
+        warmup_scheduler = LinearLR(
+            self.optimizer,
+            start_factor=0.01,
+            total_iters=warmup_steps,
+        )
 
+        # Cosine annealing
+        cosine_scheduler = CosineAnnealingLR(
+            self.optimizer,
+            T_max=total_steps - warmup_steps,
+            eta_min=self.args.lr * 0.01,
+        )
 
-def run_loso(args):
-    """Run Leave-One-Subject-Out cross-validation."""
-    # Get subjects
-    if args.dataset == 'casme2':
-        subjects = get_loso_subjects(args.data_root)
-    elif args.dataset == 'smic':
-        subjects = get_smic_subjects(args.data_root)
-    elif args.dataset == 'samm':
-        subjects = get_samm_subjects(args.data_root)
-    else:
-        raise ValueError(f"LOSO not supported for {args.dataset}")
+        self.scheduler = SequentialLR(
+            self.optimizer,
+            schedulers=[warmup_scheduler, cosine_scheduler],
+            milestones=[warmup_steps],
+        )
+        self.scheduler_step_per_batch = True
+        print(f"[Trainer] Scheduler: {warmup_steps} warmup steps + cosine (total {total_steps})")
 
-    if subjects is None:
-        print("[Error] Cannot get subjects. Check data_root and labels.csv")
-        return
+    def _compute_loss(self, outputs, me_labels, au_labels,
+                      mixup_outputs=None, mixup_lam=1.0):
+        """Compute total loss with ArcFace, SupCon, MixUp support."""
+        # ME classification loss
+        if self.use_arcface and 'adapted_feat' in outputs:
+            loss_me = self.arcface_loss(outputs['adapted_feat'], me_labels)
+        else:
+            loss_me = compute_me_loss(outputs['me_logits'], me_labels,
+                                      label_smoothing=self.args.label_smoothing)
 
-    num_folds = len(subjects)
-    print(f"\nLOSO: {num_folds} subjects = {num_folds} folds")
-    print(f"Subjects: {subjects}")
+        loss_au = compute_au_loss(outputs['au_intensities'], au_labels)
+        loss_landmark = compute_landmark_loss(outputs['au_intensities'], au_labels)
+        loss_moe = outputs['moe_aux_loss']
 
-    folds_to_run = [args.loso_fold] if args.loso_fold is not None else list(range(num_folds))
+        # Manifold MixUp
+        if mixup_outputs is not None and mixup_lam < 1.0:
+            me_labels_b = mixup_outputs['me_labels_b']
+            au_labels_b = mixup_outputs['au_labels_b']
+            loss_me_b = compute_me_loss(mixup_outputs['me_logits'], me_labels_b,
+                                        label_smoothing=self.args.label_smoothing)
+            loss_au_b = compute_au_loss(mixup_outputs['au_intensities'], au_labels_b)
+            loss_me = mixup_lam * loss_me + (1 - mixup_lam) * loss_me_b
+            loss_au = mixup_lam * loss_au + (1 - mixup_lam) * loss_au_b
 
-    fold_results = {}
-    for fold_idx in folds_to_run:
-        fold_args = argparse.Namespace(**vars(args))
-        fold_args.loso_fold = fold_idx
-        fold_args.loso = True
+        # SupCon loss
+        loss_supcon = torch.tensor(0.0, device=me_labels.device)
+        if self.loss_weights['supcon'] > 0 and 'adapted_feat' in outputs:
+            loss_supcon = self.supcon_loss(outputs['adapted_feat'], me_labels)
 
-        acc = run_training(fold_args)
-        fold_results[fold_idx] = {'acc': acc, 'subject': subjects[fold_idx]}
+        total_loss = (
+            self.loss_weights['me'] * loss_me +
+            self.loss_weights['au'] * loss_au +
+            self.loss_weights['moe'] * loss_moe +
+            self.loss_weights['landmark'] * loss_landmark +
+            self.loss_weights['supcon'] * loss_supcon
+        )
+        return total_loss
 
-    # Print LOSO summary
-    print(f"\n{'='*60}")
-    print(f" LOSO Cross-Validation Summary ({args.dataset})")
-    print(f"{'='*60}")
-    accs = [r['acc'] for r in fold_results.values()]
-    for fold_idx, res in sorted(fold_results.items()):
-        print(f"  Fold {fold_idx} ({res['subject']}): Acc={res['acc']:.4f}")
-    print(f"\n  Mean Acc: {np.mean(accs):.4f} +/- {np.std(accs):.4f}")
-    print(f"{'='*60}")
+    def train_epoch(self):
+        """Train one epoch with Manifold MixUp."""
+        self.model.train()
+        total_loss = 0.0
+        correct = 0
+        total = 0
+        accum_steps = self.args.grad_accum_steps
 
-    # Save summary
-    stage_dir = f"{args.stage}_{args.dataset}"
-    summary_path = os.path.join(args.output_dir, stage_dir, 'loso_summary.csv')
-    os.makedirs(os.path.dirname(summary_path), exist_ok=True)
-    with open(summary_path, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=['fold', 'subject', 'accuracy'])
-        writer.writeheader()
-        for fold_idx, res in sorted(fold_results.items()):
-            writer.writerow({'fold': fold_idx, 'subject': res['subject'], 'accuracy': res['acc']})
-    print(f"LOSO summary saved to: {summary_path}")
+        for batch_idx, batch in enumerate(self.train_loader):
+            frames = batch['frames'].to(self.device)
+            me_labels = batch['me_label'].to(self.device)
+            au_labels = batch.get('au_label', torch.zeros(frames.size(0), 28)).to(self.device)
+
+            # Forward
+            outputs = self.model(frames)
+
+            # Manifold MixUp on adapted_feat
+            mixup_outputs = None
+            mixup_lam = 1.0
+            if self.args.mixup_alpha > 0 and 'adapted_feat' in outputs:
+                mixed_feat, me_a, me_b, au_a, au_b, lam = manifold_mixup(
+                    outputs['adapted_feat'], me_labels, au_labels,
+                    alpha=self.args.mixup_alpha
+                )
+                if lam < 1.0:
+                    mixup_lam = lam
+                    me_logits_mix, _, _ = self.model.moe(mixed_feat)
+                    au_intensities_mix, _ = self.model.au_decoder(mixed_feat)
+                    mixup_outputs = {
+                        'me_logits': me_logits_mix,
+                        'au_intensities': au_intensities_mix,
+                        'me_labels_b': me_b,
+                        'au_labels_b': au_b,
+                    }
+
+            # Compute loss
+            loss = self._compute_loss(outputs, me_labels, au_labels,
+                                      mixup_outputs, mixup_lam)
+            loss = loss / accum_steps
+
+            # Backward
+            loss.backward()
+
+            # Gradient accumulation
+            if (batch_idx + 1) % accum_steps == 0:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+                if self.scheduler_step_per_batch:
+                    self.scheduler.step()
+
+            # Metrics
+            total_loss += loss.item() * accum_steps
+            preds = outputs['me_logits'].argmax(dim=1)
+            correct += (preds == me_labels).sum().item()
+            total += me_labels.size(0)
+
+        avg_loss = total_loss / max(1, len(self.train_loader))
+        acc = correct / max(1, total)
+        return avg_loss, acc
+
+    @torch.no_grad()
+    def validate(self, loader=None):
+        """Validate on given loader."""
+        self.model.eval()
+        if loader is None:
+            loader = self.val_loader
+
+        total_loss = 0.0
+        correct = 0
+        total = 0
+        all_preds = []
+        all_labels = []
+
+        for batch in loader:
+            frames = batch['frames'].to(self.device)
+            me_labels = batch['me_label'].to(self.device)
+            au_labels = batch.get('au_label', torch.zeros(frames.size(0), 28)).to(self.device)
+
+            outputs = self.model(frames)
+            loss = self._compute_loss(outputs, me_labels, au_labels)
+
+            total_loss += loss.item()
+            preds = outputs['me_logits'].argmax(dim=1)
+            correct += (preds == me_labels).sum().item()
+            total += me_labels.size(0)
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(me_labels.cpu().numpy())
+
+        avg_loss = total_loss / max(1, len(loader))
+        acc = correct / max(1, total)
+
+        # Compute F1
+        from sklearn.metrics import f1_score
+        f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+
+        return avg_loss, acc, f1
+
+    def train(self):
+        """Main training loop."""
+        args = self.args
+
+        if args.loso and self.phase == 'finetune':
+            self._train_loso()
+        else:
+            self._train_standard()
+
+    def _train_standard(self):
+        """Standard training loop (pretrain or finetune with random split)."""
+        args = self.args
+        print(f"\n{'='*60}")
+        print(f" Phase: {self.phase.upper()}")
+        print(f" Epochs: {args.epochs}")
+        print(f" Batch size: {args.batch_size}")
+        print(f" LR: {args.lr} (backbone {args.lr * args.backbone_lr_factor:.2e})")
+        print(f" ArcFace: {self.use_arcface}")
+        print(f" MixUp alpha: {args.mixup_alpha}")
+        print(f" SupCon weight: {args.supcon_weight}")
+        print(f"{'='*60}\n")
+
+        for epoch in range(1, args.epochs + 1):
+            t0 = time.time()
+
+            # Train
+            train_loss, train_acc = self.train_epoch()
+
+            # Validate
+            val_loss, val_acc, val_f1 = self.validate()
+
+            # LR logging
+            current_lr = self.optimizer.param_groups[0]['lr']
+
+            elapsed = time.time() - t0
+
+            print(f"Epoch {epoch}/{args.epochs} ({elapsed:.0f}s) | "
+                  f"Train Loss: {train_loss:.4f} Acc: {train_acc:.4f} | "
+                  f"Val Loss: {val_loss:.4f} Acc: {val_acc:.4f} F1: {val_f1:.4f} | "
+                  f"LR: {current_lr:.2e}")
+
+            # CSV log
+            self.csv_writer.writerow([
+                epoch, f'{train_loss:.4f}', f'{val_loss:.4f}',
+                f'{val_acc:.4f}', f'{val_f1:.4f}', f'{current_lr:.2e}',
+                self.phase
+            ])
+            self.csv_file.flush()
+
+            # Save best
+            if val_acc > self.best_acc:
+                self.best_acc = val_acc
+                self.best_f1 = val_f1
+                self._save_checkpoint('best', epoch, val_acc, val_f1)
+                self.patience_counter = 0
+                print(f"  -> New best: acc={val_acc:.4f} f1={val_f1:.4f}")
+            else:
+                self.patience_counter += 1
+
+            # Save periodic checkpoint
+            if epoch % args.save_every == 0:
+                self._save_checkpoint(f'epoch_{epoch}', epoch, val_acc, val_f1)
+
+            # Early stopping
+            if self.patience_counter >= args.patience:
+                print(f"Early stopping at epoch {epoch} (patience={args.patience})")
+                break
+
+        print(f"\nBest {self.phase} result: acc={self.best_acc:.4f} f1={self.best_f1:.4f}")
+        self.csv_file.close()
+
+    def _train_loso(self):
+        """LOSO (Leave-One-Subject-Out) cross-validation."""
+        args = self.args
+        subjects = self.loso_subjects
+        num_folds = len(subjects)
+
+        print(f"\n{'='*60}")
+        print(f" LOSO Fine-tune: {num_folds} folds")
+        print(f"{'='*60}\n")
+
+        all_fold_accs = []
+        all_fold_f1s = []
+
+        for fold_idx, test_subject in enumerate(subjects):
+            print(f"\n--- Fold {fold_idx+1}/{num_folds}: test_subject={test_subject} ---")
+
+            # Split dataset by subject
+            train_indices = []
+            val_indices = []
+            for i in range(len(self.full_dataset)):
+                sample = self.full_dataset[i]
+                if hasattr(self.full_dataset, 'get_subject'):
+                    subj = self.full_dataset.get_subject(i)
+                else:
+                    subj = sample.get('subject', '')
+                if subj == test_subject:
+                    val_indices.append(i)
+                else:
+                    train_indices.append(i)
+
+            if len(val_indices) == 0 or len(train_indices) == 0:
+                print(f"  Skipping fold (train={len(train_indices)}, val={len(val_indices)})")
+                continue
+
+            train_subset = torch.utils.data.Subset(self.full_dataset, train_indices)
+            val_subset = torch.utils.data.Subset(self.full_dataset, val_indices)
+
+            train_loader = DataLoader(train_subset, batch_size=args.batch_size,
+                                      shuffle=True, num_workers=args.num_workers,
+                                      pin_memory=True, drop_last=True)
+            val_loader = DataLoader(val_subset, batch_size=args.batch_size,
+                                    shuffle=False, num_workers=args.num_workers,
+                                    pin_memory=True)
+
+            # Reset model for each fold (reload pretrained)
+            if args.pretrained:
+                self._load_pretrained(args.pretrained)
+            else:
+                # Reinitialize head only
+                for module in [self.model.moe, self.model.au_decoder, self.model.fusion]:
+                    for layer in module.modules():
+                        if hasattr(layer, 'reset_parameters'):
+                            layer.reset_parameters()
+
+            # Reset optimizer
+            self._setup_optimizer()
+            self._setup_scheduler()
+
+            # Train fold
+            best_fold_acc = 0.0
+            best_fold_f1 = 0.0
+            patience_counter = 0
+
+            for epoch in range(1, args.epochs + 1):
+                self.model.train()
+                total_loss = 0.0
+                correct = 0
+                total = 0
+
+                for batch in train_loader:
+                    frames = batch['frames'].to(self.device)
+                    me_labels = batch['me_label'].to(self.device)
+                    au_labels = batch.get('au_label',
+                                         torch.zeros(frames.size(0), 28)).to(self.device)
+
+                    outputs = self.model(frames)
+
+                    # Manifold MixUp
+                    mixup_outputs = None
+                    mixup_lam = 1.0
+                    if args.mixup_alpha > 0 and 'adapted_feat' in outputs:
+                        mixed_feat, me_a, me_b, au_a, au_b, lam = manifold_mixup(
+                            outputs['adapted_feat'], me_labels, au_labels,
+                            alpha=args.mixup_alpha
+                        )
+                        if lam < 1.0:
+                            mixup_lam = lam
+                            me_logits_mix, _, _ = self.model.moe(mixed_feat)
+                            au_intensities_mix, _ = self.model.au_decoder(mixed_feat)
+                            mixup_outputs = {
+                                'me_logits': me_logits_mix,
+                                'au_intensities': au_intensities_mix,
+                                'me_labels_b': me_b,
+                                'au_labels_b': au_b,
+                            }
+
+                    loss = self._compute_loss(outputs, me_labels, au_labels,
+                                              mixup_outputs, mixup_lam)
+                    self.optimizer.zero_grad()
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    self.optimizer.step()
+                    if self.scheduler_step_per_batch:
+                        self.scheduler.step()
+
+                    total_loss += loss.item()
+                    preds = outputs['me_logits'].argmax(dim=1)
+                    correct += (preds == me_labels).sum().item()
+                    total += me_labels.size(0)
+
+                train_acc = correct / max(1, total)
+
+                # Validate
+                val_loss, val_acc, val_f1 = self.validate(val_loader)
+
+                if epoch % 5 == 0 or epoch == 1:
+                    print(f"  Epoch {epoch}/{args.epochs} | "
+                          f"Train Acc: {train_acc:.4f} | "
+                          f"Val Acc: {val_acc:.4f} F1: {val_f1:.4f}")
+
+                if val_acc > best_fold_acc:
+                    best_fold_acc = val_acc
+                    best_fold_f1 = val_f1
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+
+                if patience_counter >= args.patience:
+                    print(f"  Early stop at epoch {epoch}")
+                    break
+
+            all_fold_accs.append(best_fold_acc)
+            all_fold_f1s.append(best_fold_f1)
+            print(f"  Fold result: acc={best_fold_acc:.4f} f1={best_fold_f1:.4f}")
+
+        # Summary
+        if all_fold_accs:
+            mean_acc = np.mean(all_fold_accs)
+            std_acc = np.std(all_fold_accs)
+            mean_f1 = np.mean(all_fold_f1s)
+            std_f1 = np.std(all_fold_f1s)
+            print(f"\n{'='*60}")
+            print(f" LOSO Results ({len(all_fold_accs)} folds)")
+            print(f"{'='*60}")
+            print(f"  Accuracy: {mean_acc:.4f} +/- {std_acc:.4f}")
+            print(f"  F1 Score: {mean_f1:.4f} +/- {std_f1:.4f}")
+            print(f"  Per-fold: {[f'{a:.3f}' for a in all_fold_accs]}")
+            print(f"{'='*60}")
+
+            # Save LOSO results
+            results_path = os.path.join(args.log_dir or './logs', 'loso_results.txt')
+            with open(results_path, 'w') as f:
+                f.write(f"LOSO Results ({len(all_fold_accs)} folds)\n")
+                f.write(f"Accuracy: {mean_acc:.4f} +/- {std_acc:.4f}\n")
+                f.write(f"F1 Score: {mean_f1:.4f} +/- {std_f1:.4f}\n")
+                for i, (acc, f1) in enumerate(zip(all_fold_accs, all_fold_f1s)):
+                    f.write(f"Fold {i}: acc={acc:.4f} f1={f1:.4f}\n")
+
+        self.csv_file.close()
+
+    def _save_checkpoint(self, tag, epoch, val_acc, val_f1):
+        """Save model checkpoint."""
+        save_dir = self.args.save_dir or './checkpoints'
+        os.makedirs(save_dir, exist_ok=True)
+        phase_tag = 'pretrain' if self.phase == 'pretrain' else 'finetune'
+        path = os.path.join(save_dir, f'{phase_tag}_{tag}.pth')
+
+        state = {
+            'epoch': epoch,
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'val_acc': val_acc,
+            'val_f1': val_f1,
+            'phase': self.phase,
+        }
+        if self.use_arcface:
+            state['arcface_state_dict'] = self.arcface_loss.state_dict()
+
+        torch.save(state, path)
+        print(f"  Saved: {path}")
 
 
 # =============================================================================
-# Argument Parsing
+# Argument Parser
 # =============================================================================
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Censor Cross-Dataset Training')
+    parser = argparse.ArgumentParser(description='Censor Multi-Dataset Training')
 
-    # Stage
-    parser.add_argument('--stage', type=str, default='pretrain',
+    # Phase
+    parser.add_argument('--phase', type=str, default='pretrain',
                         choices=['pretrain', 'finetune'],
-                        help='pretrain on CASME2 or finetune on SMIC/SAMM')
-    parser.add_argument('--dataset', type=str, default='casme2',
+                        help='Training phase: pretrain (joint) or finetune (single)')
+
+    # Dataset roots
+    parser.add_argument('--casme_root', type=str, default=None,
+                        help='CASME2 dataset root directory')
+    parser.add_argument('--smic_root', type=str, default=None,
+                        help='SMIC dataset root directory')
+    parser.add_argument('--samm_root', type=str, default=None,
+                        help='SAMM dataset root directory')
+    parser.add_argument('--target_dataset', type=str, default='casme2',
                         choices=['casme2', 'smic', 'samm'],
-                        help='Target dataset')
+                        help='Target dataset for finetune phase')
 
-    # Data
-    parser.add_argument('--data_root', type=str, default='/root/autodl-tmp/data/CASME2')
+    # Model
     parser.add_argument('--pretrained', type=str, default=None,
-                        help='Path to pretrained checkpoint (for finetune)')
-
-    # Frame sequence params
-    parser.add_argument('--T', type=int, default=16)
-    parser.add_argument('--H', type=int, default=224)
-    parser.add_argument('--W', type=int, default=224)
+                        help='Pretrained checkpoint path for finetune')
+    parser.add_argument('--no_fast_preprocess', action='store_true',
+                        help='Use TV-L1 optical flow (slow) instead of frame difference')
 
     # Training
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=8)
-    parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--weight_decay', type=float, default=1e-4)
-    parser.add_argument('--max_grad_norm', type=float, default=5.0)
+    parser.add_argument('--lr', type=float, default=3e-4)
+    parser.add_argument('--backbone_lr_factor', type=float, default=0.1,
+                        help='Backbone LR = lr * this factor (0.1 = 10x smaller)')
+    parser.add_argument('--weight_decay', type=float, default=0.05)
+    parser.add_argument('--warmup_epochs', type=int, default=5)
+    parser.add_argument('--patience', type=int, default=20)
+    parser.add_argument('--grad_accum_steps', type=int, default=2,
+                        help='Gradient accumulation steps (effective batch = batch_size * this)')
+    parser.add_argument('--save_every', type=int, default=10)
 
-    # Loss weights
-    parser.add_argument('--au_loss_weight', type=float, default=0.1)
-    parser.add_argument('--moe_loss_weight', type=float, default=0.01)
-    parser.add_argument('--landmark_loss_weight', type=float, default=0.05)
-
-    # Freeze
-    parser.add_argument('--freeze_backbone', action='store_true',
-                        help='Freeze backbone for initial epochs')
-    parser.add_argument('--freeze_epochs', type=int, default=30,
-                        help='Epochs to freeze backbone before unfreezing')
-
-    # LOSO
+    # Data
+    parser.add_argument('--T', type=int, default=16)
+    parser.add_argument('--H', type=int, default=224)
+    parser.add_argument('--W', type=int, default=224)
+    parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--loso', action='store_true',
-                        help='Enable Leave-One-Subject-Out cross-validation')
-    parser.add_argument('--loso_fold', type=int, default=None,
-                        help='Run specific LOSO fold')
+                        help='Use Leave-One-Subject-Out evaluation')
 
-    # Face alignment
-    parser.add_argument('--no_face_align', action='store_true',
-                        help='Disable face alignment')
+    # Loss
+    parser.add_argument('--label_smoothing', type=float, default=0.1)
+    parser.add_argument('--use_arcface', action='store_true',
+                        help='Use ArcFace angular margin loss')
+    parser.add_argument('--arcface_margin', type=float, default=0.2,
+                        help='ArcFace angular margin (0.2 typical, 0.5 aggressive)')
+    parser.add_argument('--arcface_weight', type=float, default=1.0,
+                        help='Weight for ArcFace loss')
+    parser.add_argument('--supcon_weight', type=float, default=0.1,
+                        help='Weight for SupCon loss (0 to disable)')
 
-    # Misc
-    parser.add_argument('--val_every', type=int, default=1)
-    parser.add_argument('--save_every', type=int, default=20)
-    parser.add_argument('--output_dir', type=str, default='./checkpoints')
-    parser.add_argument('--log_interval', type=int, default=10)
-    parser.add_argument('--num_workers', type=int, default=2)
+    # Augmentation
+    parser.add_argument('--mixup_alpha', type=float, default=0.2,
+                        help='Manifold MixUp alpha (0 to disable)')
+
+    # Output
+    parser.add_argument('--save_dir', type=str, default=None)
+    parser.add_argument('--log_dir', type=str, default=None)
     parser.add_argument('--seed', type=int, default=42)
 
     return parser.parse_args()
 
 
-if __name__ == '__main__':
+# =============================================================================
+# Main
+# =============================================================================
+
+def main():
     args = parse_args()
 
+    # Seed
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
 
-    print(f"Stage: {args.stage}")
-    print(f"Dataset: {args.dataset}")
-    print(f"Freeze backbone: {args.freeze_backbone}")
-    print(f"Face alignment: {not args.no_face_align}")
+    # Default save/log dirs
+    if args.save_dir is None:
+        args.save_dir = f'./checkpoints/{args.phase}'
+    if args.log_dir is None:
+        args.log_dir = f'./logs/{args.phase}'
 
-    if args.loso:
-        run_loso(args)
-    else:
-        run_training(args)
+    # Train
+    trainer = CrossDatasetTrainer(args)
+    trainer.train()
+
+
+if __name__ == '__main__':
+    main()

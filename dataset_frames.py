@@ -211,8 +211,11 @@ class FrameSequenceDataset(Dataset):
     """
 
     EMOTION_NAMES = [
-        'happiness', 'surprise', 'disgust', 'repression', 'others'
+        'happiness', 'surprise', 'disgust', 'repression'
     ]
+
+    # 4-class: exclude others (too noisy, 41% of data, hurts learning)
+    EXCLUDE_EMOTIONS = {'sadness', 'fear', 'anger', 'contempt', 'others'}
 
     def __init__(self, data_root, split='train', T=None, H=None, W=None,
                  augment=None, temporal_jitter=None, val_ratio=0.2, seed=42,
@@ -277,7 +280,6 @@ class FrameSequenceDataset(Dataset):
 
         emotion_map = {
             'happiness': 0, 'surprise': 1, 'disgust': 2, 'repression': 3,
-            'sadness': 4, 'fear': 4, 'anger': 4, 'contempt': 4, 'others': 4,
         }
 
         samples = []
@@ -290,7 +292,14 @@ class FrameSequenceDataset(Dataset):
                 continue
 
             emotion = str(row['Emotion']).strip().lower() if pd.notna(row['Emotion']) else 'others'
-            me_label = emotion_map.get(emotion, 4)
+
+            # Skip 'others' class -- too noisy for 255-sample training
+            if emotion in self.EXCLUDE_EMOTIONS:
+                continue
+
+            me_label = emotion_map.get(emotion, -1)
+            if me_label == -1:
+                continue
 
             frame_files = sorted([f for f in os.listdir(frame_dir) if f.endswith('.jpg')])
             num_frames = len(frame_files)

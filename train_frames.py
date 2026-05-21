@@ -36,7 +36,7 @@ from dataset_frames import FrameSequenceDataset, get_casme2_dataloaders
 # =============================================================================
 
 class SyntheticMERDataset(Dataset):
-    ME_CATEGORIES = ["Happiness", "Surprise", "Disgust", "Repression", "Others"]
+    ME_CATEGORIES = ["Happiness", "Surprise", "Disgust", "Repression"]
 
     def __init__(self, num_samples=100, T=16, H=224, W=224):
         self.num_samples = num_samples
@@ -52,7 +52,7 @@ class SyntheticMERDataset(Dataset):
         std = torch.tensor(DATA_CONFIG['normalize_std']).view(3, 1, 1, 1)
         video = torch.randn(3, self.T, self.H, self.W) * 0.1 + 0.5
         video = (video - mean) / std
-        me_label = torch.randint(0, len(self.ME_CATEGORIES), (1,)).item()
+        me_label = torch.randint(0, 4, (1,)).item()
         au_label = (torch.rand(28) > 0.7).float()
         return video, me_label, au_label
 
@@ -79,9 +79,9 @@ class FocalLoss(nn.Module):
 
 
 def compute_me_loss(me_logits, me_labels):
-    # Focal Loss with class weights for CASME2 merged 5-class
-    # 0:happiness(32), 1:surprise(28), 2:disgust(63), 3:repression(27), 4:others(99)
-    freq = torch.tensor([32., 28., 63., 27., 99.], device=me_logits.device)
+    # Focal Loss with class weights for CASME2 4-class (exclude others)
+    # 0:happiness(32), 1:surprise(28), 2:disgust(63), 3:repression(27)
+    freq = torch.tensor([32., 28., 63., 27.], device=me_logits.device)
     weights = 1.0 / freq
     weights = weights / weights.sum() * len(weights)
     return FocalLoss(alpha=weights, gamma=2.0)(me_logits, me_labels)
@@ -108,7 +108,7 @@ def compute_landmark_loss(au_intensities, au_labels):
 # =============================================================================
 
 class MetricsTracker:
-    ME_CATEGORIES = ["Happiness", "Surprise", "Disgust", "Repression", "Others"]
+    ME_CATEGORIES = ["Happiness", "Surprise", "Disgust", "Repression"]
 
     def __init__(self):
         self.reset()
@@ -149,7 +149,7 @@ class MetricsTracker:
     @property
     def me_f1(self):
         f1_scores = []
-        for cls in range(5):
+        for cls in range(4):
             total = self.class_total.get(cls, 0)
             correct = self.class_correct.get(cls, 0)
             prec = correct / max(total, 1)
@@ -406,6 +406,15 @@ class Trainer:
         for epoch in range(1, args.epochs + 1):
             epoch_start = time.time()
 
+            # Unfreeze backbones after freeze_epochs
+            if args.freeze_backbone and epoch == args.freeze_epochs + 1:
+                print(f"\n[Unfreeze] Unfreezing backbones at epoch {epoch}")
+                for name, param in self.model.named_parameters():
+                    if 'fast_pathway' in name or 'slow_pathway' in name:
+                        param.requires_grad = True
+                trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+                print(f"[Unfreeze] Trainable params: {trainable:,}")
+
             print(f"\n{'='*50}")
             print(f"Epoch {epoch}/{args.epochs}")
             print(f"{'='*50}")
@@ -480,9 +489,10 @@ def parse_args():
     parser.add_argument('--max_grad_norm', type=float, default=5.0)
 
     # Loss weights
-    parser.add_argument('--au_loss_weight', type=float, default=0.5)
+    parser.add_argument('--au_loss_weight', type=float, default=0.1,
+                        help='AU loss weight (reduced -- AU labels are noisy)')
     parser.add_argument('--moe_loss_weight', type=float, default=0.01)
-    parser.add_argument('--landmark_loss_weight', type=float, default=0.1)
+    parser.add_argument('--landmark_loss_weight', type=float, default=0.05)
 
     # Validation / Save
     parser.add_argument('--val_every', type=int, default=1)
@@ -495,6 +505,12 @@ def parse_args():
     # Face alignment
     parser.add_argument('--no_face_align', action='store_true',
                         help='Disable gaze stabilization reflex (face alignment)')
+
+    # Backbone freezing (for small datasets)
+    parser.add_argument('--freeze_backbone', action='store_true',
+                        help='Freeze dual-pathway backbones (only train head)')
+    parser.add_argument('--freeze_epochs', type=int, default=30,
+                        help='Epochs to freeze backbone before unfreezing')
 
     # LOSO cross-validation
     parser.add_argument('--loso', action='store_true',
@@ -526,6 +542,15 @@ def train_single_fold(args, fold_idx, loso_subjects=None):
     model = Censor(fast_preprocess=True, verbose=False)
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    # Freeze backbones if requested (small dataset regularization)
+    if args.freeze_backbone:
+        print(f"[Freeze] Freezing dual-pathway backbones for {args.freeze_epochs} epochs")
+        for name, param in model.named_parameters():
+            if 'fast_pathway' in name or 'slow_pathway' in name:
+                param.requires_grad = False
+        trainable_frozen = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"[Freeze] Trainable params: {trainable_frozen:,} / {total_params:,}")
 
     fold_label = f"fold_{fold_idx}" if fold_idx is not None else "standard"
     output_dir = os.path.join(args.output_dir, fold_label)

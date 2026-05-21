@@ -240,7 +240,7 @@ class Trainer:
         # Mixed precision
         self.use_amp = torch.cuda.is_available()
         if self.use_amp:
-            self.scaler = torch.amp.GradScaler('cuda')
+            self.scaler = torch.cuda.amp.GradScaler()
         else:
             self.scaler = None
             print("[Trainer] AMP disabled (no CUDA). Training on CPU.")
@@ -269,7 +269,7 @@ class Trainer:
             self.optimizer.zero_grad()
 
             if self.use_amp:
-                with torch.amp.autocast('cuda'):
+                with torch.cuda.amp.autocast():
                     outputs = self.model(videos)
                     total_loss = self._compute_loss(outputs, me_labels, au_labels)
             else:
@@ -345,7 +345,7 @@ class Trainer:
             au_labels = au_labels.to(self.device)
 
             if self.use_amp:
-                with torch.amp.autocast('cuda'):
+                with torch.cuda.amp.autocast():
                     outputs = self.model(videos)
             else:
                 outputs = self.model(videos)

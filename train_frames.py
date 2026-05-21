@@ -62,7 +62,13 @@ class SyntheticMERDataset(Dataset):
 # =============================================================================
 
 def compute_me_loss(me_logits, me_labels):
-    return nn.CrossEntropyLoss()(me_logits, me_labels)
+    # Class weights to handle CASME2 imbalance
+    # 0:happiness(32), 1:sadness(4), 2:surprise(28), 3:fear(2),
+    # 4:anger(0), 5:disgust(63), 6:contempt(0), 7:others(99)
+    freq = torch.tensor([32., 4., 28., 2., 1., 63., 1., 99.], device=me_logits.device)
+    weights = 1.0 / freq
+    weights = weights / weights.sum() * len(weights)  # normalize so avg weight = 1
+    return nn.CrossEntropyLoss(weight=weights)(me_logits, me_labels)
 
 
 def compute_au_loss(au_intensities, au_labels):

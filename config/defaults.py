@@ -124,7 +124,7 @@ MOE_CONFIG = {
     'hidden_dim': 512,
     'num_experts': 3,
     'gating_hidden_dim': 128,
-    'num_classes': 11,         # ME categories (11 after expansion)
+    'num_classes': 8,          # CASME2 ME categories (8 classes: 0-7)
     'top_k': 2,
     'load_balancing_lambda': 0.01,  # weight for auxiliary loss
 }

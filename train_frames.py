@@ -604,19 +604,16 @@ class Trainer:
                 for name, module in self.model.named_modules():
                     if hasattr(module, 'reset_parameters') and ('moe' in name or 'radar' in name):
                         module.reset_parameters()
-                # Also reset optimizer state for MoE params
+                # Clear optimizer state so it re-initializes for reset params
+                param_names_to_reset = set()
+                for n, p in self.model.named_parameters():
+                    if 'moe' in n or 'radar' in n:
+                        param_names_to_reset.add(n)
+                # Remove optimizer state for reset params
                 for group in self.optimizer.param_groups:
                     for p in group['params']:
-                        if p.requires_grad:
-                            # Only reset state for MoE/radar params
-                            param_name = None
-                            for n, mp in self.model.named_parameters():
-                                if mp is p:
-                                    param_name = n
-                                    break
-                            if param_name and ('moe' in param_name or 'radar' in param_name):
-                                if p in self.optimizer.state:
-                                    self.optimizer.state[p]['step'] = 0
+                        if p in param_names_to_reset and p in self.optimizer.state:
+                            del self.optimizer.state[p]
 
             # Unfreeze backbones after freeze_epochs
             if args.freeze_backbone and epoch == args.freeze_epochs + 1:

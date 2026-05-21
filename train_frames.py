@@ -497,7 +497,7 @@ if __name__ == '__main__':
 
     # Model
     print("\nBuilding Censor model...")
-    model = Censor()
+    model = Censor(fast_preprocess=True)
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Total parameters: {total_params:,}")

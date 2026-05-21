@@ -304,15 +304,24 @@ class FrameSequenceDataset(Dataset):
             frame_files = sorted([f for f in os.listdir(frame_dir) if f.endswith('.jpg')])
             num_frames = len(frame_files)
 
+            # Safe int conversion -- CASME2 has invalid values like '/' in frame columns
+            def safe_int(val):
+                if pd.isna(val):
+                    return 0
+                try:
+                    return int(float(val))
+                except (ValueError, TypeError):
+                    return 0
+
             samples.append({
                 'video_path': f"{subject}/{filename}",
                 'subject': subject,
                 'filename': filename,
                 'me_label': me_label,
                 'emotion': emotion,
-                'onset': int(row['OnsetFrame']) if pd.notna(row['OnsetFrame']) else 0,
-                'apex': int(row['ApexFrame']) if pd.notna(row['ApexFrame']) else 0,
-                'offset': int(row['OffsetFrame']) if pd.notna(row['OffsetFrame']) else 0,
+                'onset': safe_int(row['OnsetFrame']),
+                'apex': safe_int(row['ApexFrame']),
+                'offset': safe_int(row['OffsetFrame']),
                 'num_frames': num_frames,
                 'action_units': str(row['ActionUnits']) if pd.notna(row['ActionUnits']) else '',
             })

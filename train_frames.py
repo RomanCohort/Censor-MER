@@ -63,14 +63,18 @@ class SyntheticMERDataset(Dataset):
 
 class FocalLoss(nn.Module):
     """Focal Loss for handling class imbalance."""
-    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
+    def __init__(self, alpha=None, gamma=2.0, label_smoothing=0.0, reduction='mean'):
         super().__init__()
         self.gamma = gamma
         self.reduction = reduction
         self.alpha = alpha  # class weights
+        self.label_smoothing = label_smoothing
 
     def forward(self, inputs, targets):
-        ce_loss = nn.functional.cross_entropy(inputs, targets, weight=self.alpha, reduction='none')
+        ce_loss = nn.functional.cross_entropy(
+            inputs, targets, weight=self.alpha,
+            label_smoothing=self.label_smoothing, reduction='none'
+        )
         pt = torch.exp(-ce_loss)
         focal_loss = ((1 - pt) ** self.gamma) * ce_loss
         if self.reduction == 'mean':
@@ -133,13 +137,39 @@ class SupConLoss(nn.Module):
         return loss
 
 
-def compute_me_loss(me_logits, me_labels):
+def mixup_data(x, y_me, y_au, alpha=0.2):
+    """MixUp data augmentation: linearly interpolate pairs of samples.
+
+    Args:
+        x: (B, C, T, H, W) video input
+        y_me: (B,) ME labels
+        y_au: (B, 28) AU labels
+        alpha: Beta distribution parameter (0 = disabled)
+
+    Returns:
+        mixed_x, y_me_a, y_me_b, y_au_a, y_au_b, lam
+    """
+    if alpha <= 0:
+        return x, y_me, y_me, y_au, y_au, 1.0
+
+    lam = np.random.beta(alpha, alpha)
+    batch_size = x.size(0)
+    index = torch.randperm(batch_size, device=x.device)
+
+    mixed_x = lam * x + (1 - lam) * x[index]
+    y_me_a, y_me_b = y_me, y_me[index]
+    y_au_a, y_au_b = y_au, y_au[index]
+
+    return mixed_x, y_me_a, y_me_b, y_au_a, y_au_b, lam
+
+
+def compute_me_loss(me_logits, me_labels, label_smoothing=0.1):
     # Focal Loss with class weights for CASME2 4-class (exclude others)
     # 0:happiness(32), 1:surprise(28), 2:disgust(63), 3:repression(27)
     freq = torch.tensor([32., 28., 63., 27.], device=me_logits.device)
     weights = 1.0 / freq
     weights = weights / weights.sum() * len(weights)
-    return FocalLoss(alpha=weights, gamma=2.0)(me_logits, me_labels)
+    return FocalLoss(alpha=weights, gamma=2.0, label_smoothing=label_smoothing)(me_logits, me_labels)
 
 
 def compute_au_loss(au_intensities, au_labels):
@@ -392,15 +422,30 @@ class Trainer:
             me_labels = me_labels.to(self.device)
             au_labels = au_labels.to(self.device)
 
+            # MixUp augmentation
+            me_labels_b = None
+            au_labels_b = None
+            lam = 1.0
+            if self.args.mixup_alpha > 0:
+                videos, me_labels, me_labels_b, au_labels, au_labels_b, lam = mixup_data(
+                    videos, me_labels, au_labels, alpha=self.args.mixup_alpha
+                )
+
             self.optimizer.zero_grad()
 
             if self.use_amp:
                 with torch.cuda.amp.autocast():
                     outputs = self.model(videos)
-                    total_loss = self._compute_loss(outputs, me_labels, au_labels)
+                    total_loss = self._compute_loss(
+                        outputs, me_labels, au_labels,
+                        me_labels_b, au_labels_b, lam
+                    )
             else:
                 outputs = self.model(videos)
-                total_loss = self._compute_loss(outputs, me_labels, au_labels)
+                total_loss = self._compute_loss(
+                    outputs, me_labels, au_labels,
+                    me_labels_b, au_labels_b, lam
+                )
 
             # BioMoE feedback
             if hasattr(self.model, 'moe') and hasattr(self.model.moe, 'apply_feedback'):
@@ -450,11 +495,23 @@ class Trainer:
 
         return metrics
 
-    def _compute_loss(self, outputs, me_labels, au_labels):
-        loss_me = compute_me_loss(outputs['me_logits'], me_labels)
+    def _compute_loss(self, outputs, me_labels, au_labels,
+                      me_labels_b=None, au_labels_b=None, lam=1.0):
+        loss_me = compute_me_loss(outputs['me_logits'], me_labels,
+                                  label_smoothing=self.args.label_smoothing)
         loss_au = compute_au_loss(outputs['au_intensities'], au_labels)
         loss_landmark = compute_landmark_loss(outputs['au_intensities'], au_labels)
         loss_moe = outputs['moe_aux_loss']
+
+        # MixUp: blend losses from both labels
+        if lam < 1.0 and me_labels_b is not None:
+            loss_me_b = compute_me_loss(outputs['me_logits'], me_labels_b,
+                                        label_smoothing=self.args.label_smoothing)
+            loss_au_b = compute_au_loss(outputs['au_intensities'], au_labels_b)
+            loss_landmark_b = compute_landmark_loss(outputs['au_intensities'], au_labels_b)
+            loss_me = lam * loss_me + (1 - lam) * loss_me_b
+            loss_au = lam * loss_au + (1 - lam) * loss_au_b
+            loss_landmark = lam * loss_landmark + (1 - lam) * loss_landmark_b
 
         # SupCon loss on fused features
         loss_supcon = torch.tensor(0.0, device=me_labels.device)
@@ -623,6 +680,14 @@ def parse_args():
     # EMA
     parser.add_argument('--ema_decay', type=float, default=0.999,
                         help='EMA decay (0 to disable, 0.999 typical)')
+
+    # MixUp
+    parser.add_argument('--mixup_alpha', type=float, default=0.2,
+                        help='MixUp alpha (0 to disable, 0.2 typical)')
+
+    # Label Smoothing
+    parser.add_argument('--label_smoothing', type=float, default=0.1,
+                        help='Label smoothing factor (0 to disable)')
 
     # Validation / Save
     parser.add_argument('--val_every', type=int, default=1)

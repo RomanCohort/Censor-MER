@@ -267,12 +267,30 @@ def manifold_mixup(feat, y_me, y_au, alpha=0.2):
     return mixed_feat, y_me_a, y_me_b, y_au_a, y_au_b, lam
 
 
-def compute_me_loss(me_logits, me_labels, label_smoothing=0.1):
-    # Focal Loss with class weights for CASME2 4-class (exclude others)
-    # 0:happiness(32), 1:surprise(28), 2:disgust(63), 3:repression(27)
-    freq = torch.tensor([32., 28., 63., 27.], device=me_logits.device)
-    weights = 1.0 / freq
-    weights = weights / weights.sum() * len(weights)
+def compute_me_loss(me_logits, me_labels, label_smoothing=0.1, num_classes=None):
+    # Focal Loss with class weights
+    # Auto-detect number of classes from logits shape
+    if num_classes is None:
+        num_classes = me_logits.shape[-1]
+
+    # CASME2 4-class frequencies: happiness(32), surprise(28), disgust(63), repression(27)
+    # 5-class (unified): happiness(32), surprise(28), disgust(63+70+159), fear(~10), anger(~20)
+    # Approximate frequencies for each class count
+    if num_classes == 4:
+        freq = torch.tensor([32., 28., 63., 27.], device=me_logits.device)
+    elif num_classes == 5:
+        # Unified: happiness, surprise, disgust(merged), fear, anger
+        freq = torch.tensor([32., 28., 192., 10., 20.], device=me_logits.device)
+    else:
+        # No class weights for unknown class counts
+        freq = None
+
+    if freq is not None:
+        weights = 1.0 / freq
+        weights = weights / weights.sum() * len(weights)
+    else:
+        weights = None
+
     return FocalLoss(alpha=weights, gamma=2.0, label_smoothing=label_smoothing)(me_logits, me_labels)
 
 

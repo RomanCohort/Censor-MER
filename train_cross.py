@@ -259,6 +259,7 @@ class CrossDatasetTrainer:
         # Best tracking
         self.best_acc = 0.0
         self.best_f1 = 0.0
+        self.best_val_loss = float('inf')
         self.patience_counter = 0
 
         # CSV logger
@@ -705,13 +706,14 @@ class CrossDatasetTrainer:
             ])
             self.csv_file.flush()
 
-            # Save best
-            if val_acc > self.best_acc:
+            # Save best (based on val_loss, not val_acc — small datasets have noisy accuracy)
+            if val_loss < self.best_val_loss:
+                self.best_val_loss = val_loss
                 self.best_acc = val_acc
                 self.best_f1 = val_f1
                 self._save_checkpoint('best', epoch, val_acc, val_f1)
                 self.patience_counter = 0
-                print(f"  -> New best: acc={val_acc:.4f} f1={val_f1:.4f}")
+                print(f"  -> New best: loss={val_loss:.4f} acc={val_acc:.4f} f1={val_f1:.4f}")
             else:
                 self.patience_counter += 1
 
@@ -788,6 +790,7 @@ class CrossDatasetTrainer:
             # Train fold
             best_fold_acc = 0.0
             best_fold_f1 = 0.0
+            best_fold_loss = float('inf')
             patience_counter = 0
 
             for epoch in range(1, args.epochs + 1):
@@ -847,7 +850,8 @@ class CrossDatasetTrainer:
                           f"Train Acc: {train_acc:.4f} | "
                           f"Val Acc: {val_acc:.4f} F1: {val_f1:.4f}")
 
-                if val_acc > best_fold_acc:
+                if val_loss < best_fold_loss:
+                    best_fold_loss = val_loss
                     best_fold_acc = val_acc
                     best_fold_f1 = val_f1
                     patience_counter = 0

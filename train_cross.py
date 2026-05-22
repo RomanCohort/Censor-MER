@@ -551,7 +551,11 @@ class CrossDatasetTrainer:
         ) if self.val_dataset else None
 
     def _setup_scheduler(self):
-        """Warmup + Cosine annealing scheduler."""
+        """Warmup + Cosine annealing scheduler. Skip for LOSO (built per-fold)."""
+        if self.train_loader is None:
+            self.scheduler = None
+            self.scheduler_step_per_batch = False
+            return
         total_steps = len(self.train_loader) * self.args.epochs
         warmup_steps = min(self.args.warmup_epochs * len(self.train_loader), total_steps // 10)
 

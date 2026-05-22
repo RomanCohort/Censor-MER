@@ -510,11 +510,13 @@ class CrossDatasetTrainer:
             )
 
             if args.loso:
-                # LOSO: Leave-One-Subject-Out
+                # LOSO: Leave-One-Subject-Out — no fixed train/val split
                 self.loso_subjects = full_dataset.subjects if hasattr(full_dataset, 'subjects') else []
                 self.full_dataset = full_dataset
                 self.train_dataset = None  # Will be set per-fold
                 self.val_dataset = None
+                self.train_loader = None   # Will be set per-fold
+                self.val_loader = None
                 print(f"[Data] LOSO mode: {len(self.loso_subjects)} subjects")
             else:
                 # Random 80/20 split
@@ -1265,9 +1267,10 @@ class CrossDatasetTrainer:
                         if hasattr(layer, 'reset_parameters'):
                             layer.reset_parameters()
 
-            # Reset optimizer
+            # Reset optimizer and scheduler for this fold
             self._setup_optimizer()
-            self._setup_scheduler()
+            self.scheduler = self._build_scheduler(self.optimizer, len(train_loader))
+            self.scheduler_step_per_batch = True
 
             # Train fold — early stopping on val macro-F1
             best_fold_acc = 0.0

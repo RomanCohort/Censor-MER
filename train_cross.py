@@ -4,7 +4,7 @@ Censor -- Multi-Dataset Joint Pretrain + Generalization Evaluation
 SOTA training pipeline for micro-expression recognition.
 
 Strategy:
-  Phase 1: Joint pretrain on CASME2 + SMIC + SAMM (unified 5-class)
+  Phase 1: Joint pretrain on CASME2 + SMIC + SAMM (dynamic class count)
   Phase 2: Generalize — LOSO on each dataset separately
 
 Key SOTA techniques:
@@ -70,29 +70,52 @@ from train_frames import compute_me_loss, compute_au_loss, compute_landmark_loss
 
 
 # =============================================================================
-# Unified 5-class emotion mapping (CASME2 + SMIC + SAMM compatible)
+# Unified emotion mapping (CASME2 + SMIC + SAMM compatible)
 # =============================================================================
-# CASME2: happiness(0), surprise(1), disgust(2), fear(3), repression(4), others(-1)
-# SMIC:   happiness(0), surprise(1), disgust(2), fear(3), others(-1)
-# SAMM:   happiness(0), surprise(1), disgust(2), fear(3), anger(4), contempt(5), others(-1)
-# Unified 5-class: happiness(0), surprise(1), disgust(2), fear(3), anger(4)
-# "others", "repression", "contempt" are excluded from training
+# Pretrain uses ONLY 3 shared emotions that all 3 datasets have:
+#   happiness, surprise, disgust
+# This ensures every class has sufficient samples across all datasets.
+#
+# repression/fear/anger are excluded from pretrain but handled in generalize
+# phase where per-dataset class counts are determined dynamically.
+#
+# CASME2: happiness, surprise, disgust, repression(27) → 3 valid + repression excluded
+# SMIC:   positive→happiness, negative→disgust, surprise → 3 valid
+# SAMM:   happiness, surprise, disgust, fear, anger → 3 valid + fear/anger excluded
 
 UNIFIED_EMOTION_MAP = {
     'happiness': 0,
     'surprise': 1,
     'disgust': 2,
-    'fear': 3,
-    'anger': 4,
-    # Excluded:
+    # Excluded from pretrain (not shared across all datasets):
+    'repression': -1,
+    'fear': -1,
+    'anger': -1,
     'sadness': -1,
     'contempt': -1,
-    'repression': -1,
     'others': -1,
     'other': -1,
+    'negative': 2,   # SMIC maps "negative" → disgust
+    'positive': 0,   # SMIC maps "positive" → happiness
 }
 
-NUM_UNIFIED_CLASSES = 5
+# For generalize phase: full mapping with all possible emotions
+FULL_EMOTION_MAP = {
+    'happiness': 0,
+    'surprise': 1,
+    'disgust': 2,
+    'repression': 3,
+    'fear': 4,
+    'anger': 5,
+    'sadness': -1,
+    'contempt': -1,
+    'others': -1,
+    'other': -1,
+    'negative': 2,
+    'positive': 0,
+}
+
+NUM_PRETRAIN_CLASSES = 3
 
 
 # =============================================================================
@@ -222,21 +245,27 @@ class CrossDatasetTrainer:
             pretrained_backbone=getattr(args, 'pretrained_backbone', False),
         ).to(self.device)
 
-        # Adjust MoE head for unified 5-class if pretraining
+        # Determine num_classes based on phase
         if self.phase == 'pretrain':
-            self._adjust_moe_for_classes(NUM_UNIFIED_CLASSES)
+            self.num_classes = NUM_PRETRAIN_CLASSES  # 3 shared emotions
+        elif self.phase == 'finetune':
+            self.num_classes = 4  # CASME2 default
+        else:
+            self.num_classes = NUM_PRETRAIN_CLASSES  # Will be reset per-dataset in generalize
+
+        # Adjust MoE head
+        self._adjust_moe_for_classes(self.num_classes)
 
         # ArcFace
         self.use_arcface = args.use_arcface
         if self.use_arcface:
-            num_cls = NUM_UNIFIED_CLASSES if self.phase == 'pretrain' else 4
             self.arcface_loss = ArcFaceLoss(
                 in_features=1024,
-                out_features=num_cls,
+                out_features=self.num_classes,
                 margin=args.arcface_margin,
                 scale=30.0,
             ).to(self.device)
-            print(f"[Trainer] ArcFace enabled (margin={args.arcface_margin}, classes={num_cls})")
+            print(f"[Trainer] ArcFace enabled (margin={args.arcface_margin}, classes={self.num_classes})")
 
         # SupCon
         self.supcon_loss = SupConLoss(temperature=0.07)
@@ -260,11 +289,14 @@ class CrossDatasetTrainer:
             self._setup_csv_logger('generalize')
             return
 
+        # Setup datasets
+        self._setup_datasets()
+
+        # Create dataloaders
+        self._setup_dataloaders()
+
         # Optimizer with differential LR
         self._setup_optimizer()
-
-        # Datasets
-        self._setup_datasets()
 
         # Scheduler
         self._setup_scheduler()
@@ -387,7 +419,7 @@ class CrossDatasetTrainer:
         return optimizer
 
     def _setup_datasets(self):
-        """Setup datasets for current phase."""
+        """Setup datasets for current phase (no dataloaders yet)."""
         args = self.args
 
         if self.phase == 'pretrain':
@@ -484,6 +516,10 @@ class CrossDatasetTrainer:
                 )
                 print(f"[Data] Fine-tune: {train_size} train, {val_size} val")
 
+    def _setup_dataloaders(self):
+        """Create dataloaders (no label remapping needed for 3-class pretrain)."""
+        args = self.args
+
         self.train_loader = DataLoader(
             self.train_dataset,
             batch_size=args.batch_size,
@@ -527,6 +563,28 @@ class CrossDatasetTrainer:
         )
         self.scheduler_step_per_batch = True
         print(f"[Trainer] Scheduler: {warmup_steps} warmup steps + cosine (total {total_steps})")
+
+    def _build_scheduler(self, optimizer, num_batches):
+        """Build warmup + cosine scheduler for a given optimizer and batch count."""
+        total_steps = num_batches * self.args.epochs
+        warmup_steps = min(self.args.warmup_epochs * num_batches, total_steps // 10)
+
+        warmup_scheduler = LinearLR(
+            optimizer,
+            start_factor=0.01,
+            total_iters=warmup_steps,
+        )
+        cosine_scheduler = CosineAnnealingLR(
+            optimizer,
+            T_max=total_steps - warmup_steps,
+            eta_min=self.args.lr * 0.01,
+        )
+        scheduler = SequentialLR(
+            optimizer,
+            schedulers=[warmup_scheduler, cosine_scheduler],
+            milestones=[warmup_steps],
+        )
+        return scheduler
 
     def _compute_loss(self, outputs, me_labels, au_labels,
                       mixup_outputs=None, mixup_lam=1.0):
@@ -660,6 +718,94 @@ class CrossDatasetTrainer:
 
         # Compute F1
         from sklearn.metrics import f1_score, accuracy_score
+        f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+
+        return avg_loss, acc, f1
+
+    def _train_epoch(self, loader, optimizer, num_classes, scheduler=None):
+        """Train one epoch on a specific loader (used by generalize LOSO)."""
+        self.model.train()
+        total_loss = 0.0
+        correct = 0
+        total = 0
+        accum_steps = self.args.grad_accum_steps
+
+        for batch_idx, batch in enumerate(loader):
+            frames = batch['frames'].to(self.device)
+            me_labels = batch['me_label'].to(self.device)
+            au_labels = batch.get('au_label', torch.zeros(frames.size(0), 28)).to(self.device)
+
+            outputs = self.model(frames)
+
+            # Manifold MixUp
+            mixup_outputs = None
+            mixup_lam = 1.0
+            if self.args.mixup_alpha > 0 and 'adapted_feat' in outputs:
+                mixed_feat, me_a, me_b, au_a, au_b, lam = manifold_mixup(
+                    outputs['adapted_feat'], me_labels, au_labels,
+                    alpha=self.args.mixup_alpha
+                )
+                if lam < 1.0:
+                    mixup_lam = lam
+                    me_logits_mix, _, _ = self.model.moe(mixed_feat)
+                    au_intensities_mix, _ = self.model.au_decoder(mixed_feat)
+                    mixup_outputs = {
+                        'me_logits': me_logits_mix,
+                        'au_intensities': au_intensities_mix,
+                        'me_labels_b': me_b,
+                        'au_labels_b': au_b,
+                    }
+
+            loss = self._compute_loss(outputs, me_labels, au_labels,
+                                      mixup_outputs, mixup_lam)
+            loss = loss / accum_steps
+            loss.backward()
+
+            if (batch_idx + 1) % accum_steps == 0:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                optimizer.step()
+                optimizer.zero_grad()
+                if scheduler:
+                    scheduler.step()
+
+            total_loss += loss.item() * accum_steps
+            preds = outputs['me_logits'].argmax(dim=1)
+            correct += (preds == me_labels).sum().item()
+            total += me_labels.size(0)
+
+        avg_loss = total_loss / max(1, len(loader))
+        acc = correct / max(1, total)
+        return avg_loss, acc
+
+    @torch.no_grad()
+    def _validate_epoch(self, loader, num_classes):
+        """Validate on a specific loader (used by generalize LOSO)."""
+        self.model.eval()
+        total_loss = 0.0
+        correct = 0
+        total = 0
+        all_preds = []
+        all_labels = []
+
+        for batch in loader:
+            frames = batch['frames'].to(self.device)
+            me_labels = batch['me_label'].to(self.device)
+            au_labels = batch.get('au_label', torch.zeros(frames.size(0), 28)).to(self.device)
+
+            outputs = self.model(frames)
+            loss = self._compute_loss(outputs, me_labels, au_labels)
+
+            total_loss += loss.item()
+            preds = outputs['me_logits'].argmax(dim=1)
+            correct += (preds == me_labels).sum().item()
+            total += me_labels.size(0)
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(me_labels.cpu().numpy())
+
+        avg_loss = total_loss / max(1, len(loader))
+        acc = correct / max(1, total)
+
+        from sklearn.metrics import f1_score
         f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
 
         return avg_loss, acc, f1
@@ -869,15 +1015,14 @@ class CrossDatasetTrainer:
             patience_counter = 0
 
             for epoch in range(args.epochs):
-                train_loss = self._train_epoch(train_loader, optimizer, num_classes)
+                train_loss, train_acc = self._train_epoch(
+                    train_loader, optimizer, num_classes, scheduler)
 
                 # Validate
                 val_loss, val_acc, val_f1 = self._validate_epoch(
                     test_loader, num_classes)
 
                 current_lr = optimizer.param_groups[0]['lr']
-                if scheduler:
-                    scheduler.step()
 
                 print(f"    Epoch {epoch+1}/{args.epochs} | "
                       f"Loss: {train_loss:.4f} | "
@@ -917,6 +1062,7 @@ class CrossDatasetTrainer:
         """Collate function that remaps labels to 0..num_classes-1."""
         frames_list = []
         labels_list = []
+        au_labels_list = []
         subjects_list = []
 
         for item in batch:
@@ -926,14 +1072,17 @@ class CrossDatasetTrainer:
                 label = label.item()
             # Remap label
             labels_list.append(label_map.get(int(label), 0))
+            au_labels_list.append(item.get('au_label', torch.zeros(28)))
             subjects_list.append(item.get('subject', ''))
 
         frames = torch.stack(frames_list)
         labels = torch.tensor(labels_list, dtype=torch.long)
+        au_labels = torch.stack(au_labels_list) if au_labels_list[0].dim() > 0 else torch.zeros(len(batch), 28)
 
         return {
             'frames': frames,
             'me_label': labels,
+            'au_label': au_labels,
             'subject': subjects_list,
         }
 

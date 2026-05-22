@@ -133,7 +133,7 @@ class SupConLoss(nn.Module):
 
 
 class ArcFaceLoss(nn.Module):
-    """ArcFace: Additive Angular Margin Loss (Deng et al., 2019)."""
+    """ArcFace: Additive Angular Margin Loss with dynamic class weighting."""
     def __init__(self, in_features, out_features, margin=0.2, scale=30.0):
         super().__init__()
         self.in_features = in_features
@@ -148,7 +148,7 @@ class ArcFaceLoss(nn.Module):
         self.threshold = math.cos(math.pi - margin)
         self.mm = math.sin(math.pi - margin) * margin
 
-    def forward(self, features, labels):
+    def forward(self, features, labels, class_weights=None):
         features = F.normalize(features, dim=1)
         weight = F.normalize(self.weight, dim=1)
         cosine = F.linear(features, weight)
@@ -167,8 +167,17 @@ class ArcFaceLoss(nn.Module):
 
         final_cosine = one_hot * output + (1.0 - one_hot) * cosine
         logits = self.scale * final_cosine
-        loss = F.cross_entropy(logits, labels)
-        return loss
+
+        # Dynamic class weights from batch label frequencies
+        if class_weights is None:
+            freq = torch.zeros(self.out_features, device=labels.device)
+            for c in range(self.out_features):
+                freq[c] = (labels == c).sum().float()
+            freq = freq.clamp(min=1.0)
+            class_weights = 1.0 / freq
+            class_weights = class_weights / class_weights.sum() * self.out_features
+
+        return F.cross_entropy(logits, labels, weight=class_weights)
 
 
 # =============================================================================

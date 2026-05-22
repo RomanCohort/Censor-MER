@@ -267,29 +267,34 @@ def manifold_mixup(feat, y_me, y_au, alpha=0.2):
     return mixed_feat, y_me_a, y_me_b, y_au_a, y_au_b, lam
 
 
-def compute_me_loss(me_logits, me_labels, label_smoothing=0.1, num_classes=None):
-    # Focal Loss with class weights
-    # Auto-detect number of classes from logits shape
+def compute_me_loss(me_logits, me_labels, label_smoothing=0.1, num_classes=None,
+                    class_weights=None):
+    """Focal Loss with class weights for imbalanced ME classification.
+
+    Args:
+        me_logits: (B, C) raw logits
+        me_labels: (B,) integer labels
+        label_smoothing: smoothing factor
+        num_classes: auto-detected from logits if None
+        class_weights: (C,) tensor of per-class weights. If None, computed from
+                       label frequencies in the current batch (dynamic balancing).
+    """
     if num_classes is None:
         num_classes = me_logits.shape[-1]
 
-    # CASME2 4-class frequencies: happiness(32), surprise(28), disgust(63), repression(27)
-    # 5-class (unified): happiness(32), surprise(28), disgust(63+70+159), fear(~10), anger(~20)
-    # Approximate frequencies for each class count
-    if num_classes == 4:
-        freq = torch.tensor([32., 28., 63., 27.], device=me_logits.device)
-    elif num_classes == 5:
-        # Unified: happiness, surprise, disgust(merged), fear, anger
-        freq = torch.tensor([32., 28., 192., 10., 20.], device=me_logits.device)
+    if class_weights is not None:
+        weights = class_weights
     else:
-        # No class weights for unknown class counts
-        freq = None
-
-    if freq is not None:
+        # Dynamic: compute weights from current batch label frequencies
+        # This adapts to whatever dataset/mapping is being used
+        freq = torch.zeros(num_classes, device=me_logits.device)
+        for c in range(num_classes):
+            freq[c] = (me_labels == c).sum().float()
+        # Avoid division by zero for classes not in this batch
+        freq = freq.clamp(min=1.0)
+        # Inverse frequency weighting: rare classes get higher weight
         weights = 1.0 / freq
-        weights = weights / weights.sum() * len(weights)
-    else:
-        weights = None
+        weights = weights / weights.sum() * num_classes
 
     return FocalLoss(alpha=weights, gamma=2.0, label_smoothing=label_smoothing)(me_logits, me_labels)
 

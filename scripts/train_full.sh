@@ -50,6 +50,7 @@ python train_cross.py \
     --arcface_margin 0.2 \
     --arcface_scale 16 \
     --label_smoothing 0.1 \
+    --save_every 999 \
     --save_dir $SAVE_DIR/pretrain \
     --log_dir $LOG_DIR/pretrain
 
@@ -86,6 +87,7 @@ python train_cross.py \
     --arcface_margin 0.3 \
     --arcface_scale 16 \
     --label_smoothing 0.1 \
+    --save_every 999 \
     --save_dir $SAVE_DIR/ft_casme2 \
     --log_dir $LOG_DIR/ft_casme2
 
@@ -113,6 +115,7 @@ python train_cross.py \
     --arcface_margin 0.3 \
     --arcface_scale 16 \
     --label_smoothing 0.1 \
+    --save_every 999 \
     --save_dir $SAVE_DIR/ft_smic \
     --log_dir $LOG_DIR/ft_smic
 
@@ -140,6 +143,7 @@ python train_cross.py \
     --arcface_margin 0.3 \
     --arcface_scale 16 \
     --label_smoothing 0.1 \
+    --save_every 999 \
     --save_dir $SAVE_DIR/ft_samm \
     --log_dir $LOG_DIR/ft_samm
 
@@ -175,6 +179,7 @@ python train_cross.py \
     --arcface_margin 0.3 \
     --arcface_scale 16 \
     --label_smoothing 0.1 \
+    --save_every 999 \
     --save_dir $SAVE_DIR/loso_casme2 \
     --log_dir $LOG_DIR/loso_casme2
 

@@ -1424,7 +1424,9 @@ def parse_args():
     parser.add_argument('--use_arcface', action='store_true',
                         help='Use ArcFace angular margin loss')
     parser.add_argument('--arcface_margin', type=float, default=0.2,
-                        help='ArcFace angular margin (0.2 typical, 0.5 aggressive)')
+                        help='ArcFace angular margin')
+    parser.add_argument('--arcface_scale', type=float, default=16.0,
+                        help='ArcFace scale (16 for small datasets, 30+ for face recognition)')
     parser.add_argument('--arcface_weight', type=float, default=1.0,
                         help='Weight for ArcFace loss')
     parser.add_argument('--supcon_weight', type=float, default=0.1,

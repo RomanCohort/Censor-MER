@@ -587,13 +587,21 @@ class CrossDatasetTrainer:
 
     def _compute_loss(self, outputs, me_labels, au_labels,
                       mixup_outputs=None, mixup_lam=1.0):
-        """Compute total loss with ArcFace, SupCon, MixUp support."""
-        # ME classification loss
+        """Compute total loss.
+
+        ArcFace and FocalLoss are complementary:
+        - FocalLoss (with dynamic class weights): handles classification + class imbalance
+        - ArcFace: constrains feature space angular geometry
+        When ArcFace is enabled, both losses are used together.
+        """
+        # ME classification: always use FocalLoss on logits (baseline proven approach)
+        loss_me = compute_me_loss(outputs['me_logits'], me_labels,
+                                  label_smoothing=self.args.label_smoothing)
+
+        # ArcFace: additional angular margin loss on adapted_feat (feature space constraint)
+        loss_arcface = torch.tensor(0.0, device=me_labels.device)
         if self.use_arcface and 'adapted_feat' in outputs:
-            loss_me = self.arcface_loss(outputs['adapted_feat'], me_labels)
-        else:
-            loss_me = compute_me_loss(outputs['me_logits'], me_labels,
-                                      label_smoothing=self.args.label_smoothing)
+            loss_arcface = self.arcface_loss(outputs['adapted_feat'], me_labels)
 
         loss_au = compute_au_loss(outputs['au_intensities'], au_labels)
         loss_landmark = compute_landmark_loss(outputs['au_intensities'], au_labels)
@@ -616,6 +624,7 @@ class CrossDatasetTrainer:
 
         total_loss = (
             self.loss_weights['me'] * loss_me +
+            self.loss_weights['arcface'] * loss_arcface +
             self.loss_weights['au'] * loss_au +
             self.loss_weights['moe'] * loss_moe +
             self.loss_weights['landmark'] * loss_landmark +

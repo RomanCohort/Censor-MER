@@ -459,62 +459,88 @@ class FastSubcorticalPathway(nn.Module):
     def _load_kinetics_pretrained(self):
         """Load Kinetics-400 pretrained 3D ResNet-18 weights.
 
-        Handles mismatches:
-        - Input channels: pretrained has 3 (RGB), ours has 2 (optical flow).
-          Solution: average RGB weights across channels for flow input.
-        - FC layer: pretrained has 400 classes, ours has output_dim=512.
-          Solution: skip FC layer.
-        - Layer structure: torchvision R3D-18 has 4 layers [64,128,256,512],
-          ours has 3 layers [64,128,256]. We load matching layers only.
+        Key name mapping between torchvision R3D-18 and our BasicBlock3D:
+          torchvision: layer{i}.{j}.conv1.0.weight  (Conv3d inside Sequential)
+          ours:        layer{i}.{j}.conv1.weight     (Conv3d directly on BasicBlock)
+          torchvision: layer{i}.{j}.conv1.1.weight  (BN inside Sequential)
+          ours:        layer{i}.{j}.bn1.weight       (BN as separate attribute)
         """
         pretrained_sd = _load_kinetics400_resnet18()
         if pretrained_sd is None:
             return
 
-        # Build mapping from torchvision keys to our keys
         our_sd = self.state_dict()
         loaded, skipped = 0, 0
 
-        # 1. Stem conv: pretrained (3,64,..) -> ours (2,64,..)
-        # Average first conv weights across RGB channels
-        if 'stem.0.weight' in pretrained_sd:
-            pretrained_stem = pretrained_sd['stem.0.weight']  # (64, 3, 3, 7, 7)
-            our_stem_shape = our_sd['stem.0.weight'].shape    # (64, 2, 3, 7, 7)
-            # Average channels: (64, 1, 3, 7, 7) then repeat for 2 channels
-            avg_weight = pretrained_stem.mean(dim=1, keepdim=True)  # (64, 1, 3, 7, 7)
-            our_sd['stem.0.weight'] = avg_weight.expand(our_stem_shape).clone()
+        # Build key mapping: torchvision_key -> our_key
+        key_map = {}
+
+        # Stem: torchvision stem = [Conv3d, BN, ReLU, MaxPool3d]
+        # Our stem = [Conv3d, BN, ReLU, MaxPool3d]
+        # stem.0 = Conv3d, stem.1 = BN — same structure!
+        key_map['stem.0.weight'] = 'stem.0.weight'  # Conv3d (handle channel mismatch separately)
+        for bn_attr in ['weight', 'bias', 'running_mean', 'running_var', 'num_batches_tracked']:
+            key_map[f'stem.1.{bn_attr}'] = f'stem.1.{bn_attr}'
+
+        # Layer blocks: torchvision uses conv{i}.0 (Conv3d) and conv{i}.1 (BN) inside Sequential
+        # We use conv{i} (Conv3d) and bn{i} (BN) as separate attributes
+        for layer_idx in range(1, 4):  # layer1, layer2, layer3
+            for block_idx in range(2):  # 2 blocks per layer
+                prefix_tv = f'layer{layer_idx}.{block_idx}'
+                prefix_our = f'layer{layer_idx}.{block_idx}'
+
+                # Conv1: tv=conv1.0, ours=conv1
+                key_map[f'{prefix_tv}.conv1.0.weight'] = f'{prefix_our}.conv1.weight'
+                # BN1: tv=conv1.1, ours=bn1
+                for bn_attr in ['weight', 'bias', 'running_mean', 'running_var', 'num_batches_tracked']:
+                    key_map[f'{prefix_tv}.conv1.1.{bn_attr}'] = f'{prefix_our}.bn1.{bn_attr}'
+
+                # Conv2: tv=conv2.0, ours=conv2
+                key_map[f'{prefix_tv}.conv2.0.weight'] = f'{prefix_our}.conv2.weight'
+                # BN2: tv=conv2.1, ours=bn2
+                for bn_attr in ['weight', 'bias', 'running_mean', 'running_var', 'num_batches_tracked']:
+                    key_map[f'{prefix_tv}.conv2.1.{bn_attr}'] = f'{prefix_our}.bn2.{bn_attr}'
+
+                # Downsample: tv=downsample.0 (Conv3d), downsample.1 (BN)
+                key_map[f'{prefix_tv}.downsample.0.weight'] = f'{prefix_our}.downsample.0.weight'
+                for bn_attr in ['weight', 'bias', 'running_mean', 'running_var', 'num_batches_tracked']:
+                    key_map[f'{prefix_tv}.downsample.1.{bn_attr}'] = f'{prefix_our}.downsample.1.{bn_attr}'
+
+        # Apply mapping
+        for tv_key, our_key in key_map.items():
+            if tv_key not in pretrained_sd:
+                continue
+            if our_key not in our_sd:
+                skipped += 1
+                continue
+
+            tv_val = pretrained_sd[tv_key]
+            our_val = our_sd[our_key]
+
+            # Handle stem Conv3d channel mismatch: (64,3,3,7,7) -> (64,2,3,7,7)
+            if tv_key == 'stem.0.weight' and tv_val.shape[1] != our_val.shape[1]:
+                avg_weight = tv_val.mean(dim=1, keepdim=True)
+                our_sd[our_key] = avg_weight.expand(our_val.shape).clone()
+                loaded += 1
+                continue
+
+            # Handle downsample Conv3d channel mismatch (shouldn't happen for layer1-3, but just in case)
+            if tv_val.shape != our_val.shape:
+                skipped += 1
+                continue
+
+            our_sd[our_key] = tv_val
             loaded += 1
 
-        # Stem BN
-        for bn_key in ['stem.1.weight', 'stem.1.bias', 'stem.1.running_mean', 'stem.1.running_var']:
-            if bn_key in pretrained_sd and bn_key in our_sd:
-                our_sd[bn_key] = pretrained_sd[bn_key]
-                loaded += 1
+        # Also load layer4 weights if we have a layer4 (we don't, but log for info)
+        l4_keys = [k for k in pretrained_sd if k.startswith('layer4')]
+        fc_keys = [k for k in pretrained_sd if k.startswith('fc')]
 
-        # 2. ResNet layers: torchvision has layer1-layer4, we have layer1-layer3
-        # torchvision: layer1(64), layer2(128), layer3(256), layer4(512)
-        # ours:        layer1(64), layer2(128), layer3(256)
-        layer_mapping = {
-            'layer1': 'layer1',
-            'layer2': 'layer2',
-            'layer3': 'layer3',
-            # skip layer4 (we don't have it)
-        }
-
-        for tv_layer, our_layer in layer_mapping.items():
-            for key in pretrained_sd:
-                if key.startswith(tv_layer + '.'):
-                    our_key = key.replace(tv_layer + '.', our_layer + '.', 1)
-                    if our_key in our_sd and our_sd[our_key].shape == pretrained_sd[key].shape:
-                        our_sd[our_key] = pretrained_sd[key]
-                        loaded += 1
-                    else:
-                        skipped += 1
-
-        # Load the filtered state dict
         self.load_state_dict(our_sd)
         print(f"[FastSubcorticalPathway] Loaded Kinetics-400 pretrained weights: "
-              f"{loaded} params loaded, {skipped} skipped")
+              f"{loaded} params loaded, {skipped} skipped, "
+              f"{len(l4_keys)} layer4 skipped (not in our model), "
+              f"{len(fc_keys)} FC skipped")
 
     def _make_layer(self, block, planes, blocks, stride):
         downsample = None
@@ -646,56 +672,56 @@ class SlowCorticalPathway(nn.Module):
     def _load_kinetics_pretrained(self):
         """Load Kinetics-400 pretrained Video Swin Transformer weights.
 
-        Handles mismatches:
-        - Input channels: pretrained has 3 (RGB), ours has 6 (RGB+rPPG).
-          Solution: copy RGB weights to first 3 channels, zero-init rPPG channels.
-        - FC layer: skip (different output dim).
-        - Architecture differences: load matching keys only, skip mismatches.
+        Our SlowPathway has a custom architecture (stage_merges + stages of SwinBlocks)
+        that differs significantly from torchvision's Swin3D (features + Sequential blocks).
+        Full weight transfer is impossible due to structural mismatch.
+
+        Strategy: Only load patch_embed weights (input projection layer).
+        This gives the model good initial RGB feature extraction from K400,
+        while the rest of the network learns from scratch on MER data.
         """
         pretrained_sd = _load_kinetics400_swin3d()
         if pretrained_sd is None:
             return
 
         our_sd = self.state_dict()
-        loaded, skipped = 0, 0
 
-        for key, val in pretrained_sd.items():
-            # Skip classification head
-            if 'head.' in key or 'fc.' in key:
-                skipped += 1
-                continue
+        # Load patch_embed.proj.weight -> our patch_embed.weight
+        # torchvision: patch_embed.proj = Conv3d(3, 96, kernel=(2,4,4), stride=(2,4,4))
+        # ours:        patch_embed = Conv3d(6, 96, kernel=(2,4,4), stride=(2,4,4), padding=(1,2,2))
+        # Note: padding differs, but weights still transfer meaningful features
+        if 'patch_embed.proj.weight' in pretrained_sd:
+            tv_weight = pretrained_sd['patch_embed.proj.weight']  # (96, 3, 2, 4, 4)
+            our_shape = our_sd['patch_embed.weight'].shape        # (96, 6, 2, 4, 4)
 
-            # Handle patch_embed input channel mismatch (3 -> 6)
-            if key == 'patch_embed.proj.weight':
-                our_key = 'patch_embed.weight'
-                if our_key in our_sd:
-                    # pretrained: (C_out, 3, t, h, w), ours: (C_out, 6, t, h, w)
-                    our_shape = our_sd[our_key].shape
-                    new_weight = torch.zeros(our_shape)
-                    new_weight[:, :3, ...] = val[:, :3, ...]  # copy RGB
-                    # rPPG channels initialized to zero (will learn)
-                    our_sd[our_key] = new_weight
-                    loaded += 1
-                continue
-
-            # Map timm key names to our key names
-            our_key = key
-            # timm uses 'patch_embed.proj' -> we use 'patch_embed'
-            our_key = our_key.replace('patch_embed.proj.', 'patch_embed.')
-            # timm uses 'patch_embed.norm' -> we use 'patch_norm'
-            our_key = our_key.replace('patch_embed.norm.', 'patch_norm.')
-            # timm uses 'layers' -> we use 'stages' with different structure
-            # Our architecture is custom, so many timm keys won't match directly
-
-            if our_key in our_sd and our_sd[our_key].shape == val.shape:
-                our_sd[our_key] = val
-                loaded += 1
+            # Check kernel size match
+            if tv_weight.shape[2:] == our_shape[2:]:
+                new_weight = torch.zeros(our_shape)
+                new_weight[:, :3, ...] = tv_weight[:, :3, ...]  # copy RGB channels
+                # rPPG channels zero-initialized (will learn)
+                our_sd['patch_embed.weight'] = new_weight
+                print(f"[SlowCorticalPathway] Loaded patch_embed: RGB channels from K400, "
+                      f"rPPG channels zero-initialized")
             else:
-                skipped += 1
+                print(f"[SlowCorticalPathway] patch_embed kernel mismatch: "
+                      f"tv={tv_weight.shape[2:]}, ours={our_shape[2:]}")
+
+        # Load patch_embed.proj.bias if it exists
+        if 'patch_embed.proj.bias' in pretrained_sd and 'patch_embed.bias' in our_sd:
+            tv_bias = pretrained_sd['patch_embed.proj.bias']
+            our_sd['patch_embed.bias'] = tv_bias
+
+        # Load patch_embed.norm (LayerNorm) -> our patch_norm
+        for norm_attr in ['weight', 'bias']:
+            tv_key = f'patch_embed.norm.{norm_attr}'
+            our_key = f'patch_norm.{norm_attr}'
+            if tv_key in pretrained_sd and our_key in our_sd:
+                if pretrained_sd[tv_key].shape == our_sd[our_key].shape:
+                    our_sd[our_key] = pretrained_sd[tv_key]
 
         self.load_state_dict(our_sd)
-        print(f"[SlowCorticalPathway] Loaded Kinetics-400 pretrained weights: "
-              f"{loaded} params loaded, {skipped} skipped (architecture mismatch expected)")
+        print(f"[SlowCorticalPathway] Loaded patch_embed + patch_norm from Kinetics-400 "
+              f"(rest of network keeps random init — architecture mismatch)")
 
     def forward(self, x):
         """

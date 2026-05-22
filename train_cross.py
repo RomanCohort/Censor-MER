@@ -267,15 +267,26 @@ class CrossDatasetTrainer:
         # SupCon
         self.supcon_loss = SupConLoss(temperature=0.07)
 
-        # Loss weights
-        self.loss_weights = {
-            'me': 1.0,
-            'au': 0.1,
-            'moe': 0.01,
-            'landmark': 0.05,
-            'supcon': args.supcon_weight,
-            'arcface': args.arcface_weight,
-        }
+        # Loss weights — pretrain focuses on ME classification only
+        # AU/landmark/MoE aux losses hurt pretrain when AU decoder outputs random values
+        if self.phase == 'pretrain':
+            self.loss_weights = {
+                'me': 1.0,
+                'au': 0.0,
+                'moe': 0.0,
+                'landmark': 0.0,
+                'supcon': 0.0,
+                'arcface': 1.0 if self.use_arcface else 0.0,
+            }
+        else:
+            self.loss_weights = {
+                'me': 1.0,
+                'au': 0.1,
+                'moe': 0.01,
+                'landmark': 0.05,
+                'supcon': args.supcon_weight,
+                'arcface': args.arcface_weight,
+            }
 
         # Load pretrained checkpoint for finetune/generalize
         if self.phase in ('finetune', 'generalize') and args.pretrained:

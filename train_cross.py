@@ -96,6 +96,18 @@ UNIFIED_EMOTION_MAP = {
     'positive': 0,   # SMIC "positive" → happiness
 }
 
+# SAMM uses integer emotion codes (from directory naming: {subject}_{AU}_{code})
+# Mapping: 1=Happiness, 2=Surprise, 3=Disgust, 4=Repression, 5=Fear, 6=Anger, 7=Others
+SAMM_EMOTION_MAP = {
+    1: 0,   # Happiness → 0
+    2: 1,   # Surprise → 1
+    3: 2,   # Disgust → 2
+    4: 3,   # Repression → 3
+    5: -1,  # Fear → excluded
+    6: -1,  # Anger → excluded
+    7: -1,  # Others → excluded
+}
+
 # For generalize phase: all possible emotions with unique slots
 FULL_EMOTION_MAP = {
     'happiness': 0,
@@ -455,7 +467,7 @@ class CrossDatasetTrainer:
                     root_dir=args.samm_root,
                     T=args.T, H=args.H, W=args.W,
                     augment=True,
-                    emotion_map=UNIFIED_EMOTION_MAP,
+                    emotion_map=SAMM_EMOTION_MAP,  # SAMM uses integer emotion codes
                     exclude_negative=True,
                 )
                 datasets.append(ds)
@@ -644,6 +656,9 @@ class CrossDatasetTrainer:
             frames = batch['frames'].to(self.device)
             me_labels = batch['me_label'].to(self.device)
             au_labels = batch.get('au_label', torch.zeros(frames.size(0), 28)).to(self.device)
+
+            # Safety: clamp labels to valid range [0, num_classes-1]
+            me_labels = me_labels.clamp(0, self.num_classes - 1)
 
             # Forward
             outputs = self.model(frames)
@@ -975,7 +990,8 @@ class CrossDatasetTrainer:
         elif dataset_name == 'samm':
             return SAMMFrameDataset(
                 root_dir=args.samm_root,
-                emotion_map=UNIFIED_EMOTION_MAP,
+                emotion_map=SAMM_EMOTION_MAP,  # SAMM uses integer emotion codes
+                exclude_negative=True,
                 n_frames=16,
             )
         return None

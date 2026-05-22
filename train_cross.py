@@ -70,36 +70,33 @@ from train_frames import compute_me_loss, compute_au_loss, compute_landmark_loss
 
 
 # =============================================================================
-# Unified emotion mapping (CASME2 + SMIC + SAMM compatible)
+# Unified emotion mapping for pretrain
 # =============================================================================
-# Pretrain uses ONLY 3 shared emotions that all 3 datasets have:
-#   happiness, surprise, disgust
-# This ensures every class has sufficient samples across all datasets.
+# Strategy: pretrain on CASME2's 4-class (the proven baseline that hit acc=0.76).
+# SMIC and SAMM samples that share happiness/surprise/disgust participate too.
+# repression-only samples (CASME2) are included to preserve that strong class.
+# SMIC has no repression, but its happiness/surprise/disgust still contribute.
+# SAMM has fear/anger instead, those are excluded from pretrain.
 #
-# repression/fear/anger are excluded from pretrain but handled in generalize
-# phase where per-dataset class counts are determined dynamically.
-#
-# CASME2: happiness, surprise, disgust, repression(27) → 3 valid + repression excluded
-# SMIC:   positive→happiness, negative→disgust, surprise → 3 valid
-# SAMM:   happiness, surprise, disgust, fear, anger → 3 valid + fear/anger excluded
+# Generalize phase uses FULL_EMOTION_MAP with per-dataset dynamic classes.
 
 UNIFIED_EMOTION_MAP = {
     'happiness': 0,
     'surprise': 1,
     'disgust': 2,
-    # Excluded from pretrain (not shared across all datasets):
-    'repression': -1,
+    'repression': 3,
+    # Excluded from pretrain:
     'fear': -1,
     'anger': -1,
     'sadness': -1,
     'contempt': -1,
     'others': -1,
     'other': -1,
-    'negative': 2,   # SMIC maps "negative" → disgust
-    'positive': 0,   # SMIC maps "positive" → happiness
+    'negative': 2,   # SMIC "negative" → disgust
+    'positive': 0,   # SMIC "positive" → happiness
 }
 
-# For generalize phase: full mapping with all possible emotions
+# For generalize phase: all possible emotions with unique slots
 FULL_EMOTION_MAP = {
     'happiness': 0,
     'surprise': 1,
@@ -115,7 +112,7 @@ FULL_EMOTION_MAP = {
     'positive': 0,
 }
 
-NUM_PRETRAIN_CLASSES = 3
+NUM_PRETRAIN_CLASSES = 4
 
 
 # =============================================================================
@@ -247,7 +244,7 @@ class CrossDatasetTrainer:
 
         # Determine num_classes based on phase
         if self.phase == 'pretrain':
-            self.num_classes = NUM_PRETRAIN_CLASSES  # 3 shared emotions
+            self.num_classes = NUM_PRETRAIN_CLASSES  # 4 classes for pretrain
         elif self.phase == 'finetune':
             self.num_classes = 4  # CASME2 default
         else:

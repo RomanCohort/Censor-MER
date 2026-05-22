@@ -309,10 +309,9 @@ class CrossDatasetTrainer:
         # Scheduler
         self._setup_scheduler()
 
-        # Best tracking
+        # Best tracking — early stopping on macro-F1 (higher is better)
         self.best_acc = 0.0
         self.best_f1 = 0.0
-        self.best_val_loss = float('inf')
         self.patience_counter = 0
 
         # CSV logger
@@ -470,16 +469,13 @@ class CrossDatasetTrainer:
             if not datasets:
                 raise ValueError("No datasets found! Check --casme_root, --smic_root, --samm_root")
 
+            # No validation split for pretrain — dataset too small for reliable val metrics
+            # Use train loss/F1 for checkpoint saving instead
             self.train_dataset = ConcatDataset(datasets)
+            self.val_dataset = None
+            self.val_loader = None
             total = len(self.train_dataset)
-            # 90/10 split for pretrain validation
-            val_size = max(1, int(total * 0.1))
-            train_size = total - val_size
-            self.train_dataset, self.val_dataset = torch.utils.data.random_split(
-                self.train_dataset, [train_size, val_size],
-                generator=torch.Generator().manual_seed(42)
-            )
-            print(f"[Data] Joint pretrain: {train_size} train, {val_size} val")
+            print(f"[Data] Joint pretrain: {total} samples (no val split)")
 
         elif self.phase == 'finetune':
             # Fine-tune on single target dataset
@@ -692,6 +688,24 @@ class CrossDatasetTrainer:
         avg_loss = total_loss / max(1, len(self.train_loader))
         acc = correct / max(1, total)
         return avg_loss, acc
+
+    @torch.no_grad()
+    def _compute_train_f1(self):
+        """Compute macro-F1 on the training set (for pretrain with no val split)."""
+        self.model.eval()
+        all_preds = []
+        all_labels = []
+        for batch in self.train_loader:
+            frames = batch['frames'].to(self.device)
+            me_labels = batch['me_label'].to(self.device)
+            outputs = self.model(frames)
+            preds = outputs['me_logits'].argmax(dim=1)
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(me_labels.cpu().numpy())
+        from sklearn.metrics import f1_score
+        f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+        self.model.train()
+        return f1
 
     @torch.no_grad()
     def validate(self, loader=None):
@@ -1016,10 +1030,9 @@ class CrossDatasetTrainer:
             optimizer = self._build_optimizer()
             scheduler = self._build_scheduler(optimizer, len(train_loader))
 
-            # Train this fold
+            # Train this fold — early stopping on val macro-F1
             best_fold_acc = 0.0
             best_fold_f1 = 0.0
-            best_fold_loss = float('inf')
             patience_counter = 0
 
             for epoch in range(args.epochs):
@@ -1039,16 +1052,15 @@ class CrossDatasetTrainer:
                       f"Val F1: {val_f1:.4f} | "
                       f"LR: {current_lr:.6f}")
 
-                # Early stopping on val_loss
-                if val_loss < best_fold_loss:
-                    best_fold_loss = val_loss
-                    best_fold_acc = val_acc
+                # Early stopping on val macro-F1 (higher is better)
+                if val_f1 > best_fold_f1:
                     best_fold_f1 = val_f1
+                    best_fold_acc = val_acc
                     patience_counter = 0
                 else:
                     patience_counter += 1
                     if patience_counter >= args.patience:
-                        print(f"    Early stop at epoch {epoch+1}")
+                        print(f"    Early stop at epoch {epoch+1} (best_F1={best_fold_f1:.4f})")
                         break
 
             fold_accs.append(best_fold_acc)
@@ -1098,8 +1110,15 @@ class CrossDatasetTrainer:
     # Standard training
     # ================================================================
     def _train_standard(self):
-        """Standard training loop (pretrain or finetune with random split)."""
+        """Standard training loop (pretrain or finetune with random split).
+
+        Early stopping criterion: macro-F1 (higher is better).
+        For pretrain (no val split): use train macro-F1.
+        For finetune (has val split): use val macro-F1.
+        """
         args = self.args
+        has_val = self.val_loader is not None
+
         print(f"\n{'='*60}")
         print(f" Phase: {self.phase.upper()}")
         print(f" Epochs: {args.epochs}")
@@ -1107,7 +1126,8 @@ class CrossDatasetTrainer:
         print(f" LR: {args.lr} (backbone {args.lr * args.backbone_lr_factor:.2e})")
         print(f" ArcFace: {self.use_arcface}")
         print(f" MixUp alpha: {args.mixup_alpha}")
-        print(f" SupCon weight: {args.supcon_weight}")
+        print(f" Early stopping: macro-F1, patience={args.patience}")
+        print(f" Val split: {'yes' if has_val else 'no (using train metrics)'}")
         print(f"{'='*60}\n")
 
         for epoch in range(1, args.epochs + 1):
@@ -1116,48 +1136,59 @@ class CrossDatasetTrainer:
             # Train
             train_loss, train_acc = self.train_epoch()
 
-            # Validate
-            val_loss, val_acc, val_f1 = self.validate()
+            # Compute train F1 for this epoch
+            train_f1 = self._compute_train_f1()
 
-            # LR logging
             current_lr = self.optimizer.param_groups[0]['lr']
-
             elapsed = time.time() - t0
 
-            print(f"Epoch {epoch}/{args.epochs} ({elapsed:.0f}s) | "
-                  f"Train Loss: {train_loss:.4f} Acc: {train_acc:.4f} | "
-                  f"Val Loss: {val_loss:.4f} Acc: {val_acc:.4f} F1: {val_f1:.4f} | "
-                  f"LR: {current_lr:.2e}")
-
-            # CSV log
-            self.csv_writer.writerow([
-                epoch, f'{train_loss:.4f}', f'{val_loss:.4f}',
-                f'{val_acc:.4f}', f'{val_f1:.4f}', f'{current_lr:.2e}',
-                self.phase
-            ])
+            if has_val:
+                val_loss, val_acc, val_f1 = self.validate()
+                monitor_f1 = val_f1
+                print(f"Epoch {epoch}/{args.epochs} ({elapsed:.0f}s) | "
+                      f"Train Loss: {train_loss:.4f} Acc: {train_acc:.4f} | "
+                      f"Val Loss: {val_loss:.4f} Acc: {val_acc:.4f} F1: {val_f1:.4f} | "
+                      f"LR: {current_lr:.2e}")
+                self.csv_writer.writerow([
+                    epoch, f'{train_loss:.4f}', f'{val_loss:.4f}',
+                    f'{val_acc:.4f}', f'{val_f1:.4f}', f'{current_lr:.2e}',
+                    self.phase
+                ])
+            else:
+                monitor_f1 = train_f1
+                print(f"Epoch {epoch}/{args.epochs} ({elapsed:.0f}s) | "
+                      f"Train Loss: {train_loss:.4f} Acc: {train_acc:.4f} F1: {train_f1:.4f} | "
+                      f"LR: {current_lr:.2e}")
+                self.csv_writer.writerow([
+                    epoch, f'{train_loss:.4f}', '',
+                    f'{train_acc:.4f}', f'{train_f1:.4f}', f'{current_lr:.2e}',
+                    self.phase
+                ])
             self.csv_file.flush()
 
-            # Save best (based on val_loss, not val_acc — small datasets have noisy accuracy)
-            if val_loss < self.best_val_loss:
-                self.best_val_loss = val_loss
-                self.best_acc = val_acc
-                self.best_f1 = val_f1
-                self._save_checkpoint('best', epoch, val_acc, val_f1)
+            # Save best — based on macro-F1 (higher is better)
+            if monitor_f1 > self.best_f1:
+                self.best_f1 = monitor_f1
+                self.best_acc = train_acc if not has_val else val_acc
+                self._save_checkpoint('best', epoch, self.best_acc, self.best_f1)
                 self.patience_counter = 0
-                print(f"  -> New best: loss={val_loss:.4f} acc={val_acc:.4f} f1={val_f1:.4f}")
+                print(f"  -> New best F1: {monitor_f1:.4f}")
             else:
                 self.patience_counter += 1
 
             # Save periodic checkpoint
             if epoch % args.save_every == 0:
-                self._save_checkpoint(f'epoch_{epoch}', epoch, val_acc, val_f1)
+                self._save_checkpoint(f'epoch_{epoch}', epoch,
+                                      train_acc if not has_val else val_acc,
+                                      monitor_f1)
 
-            # Early stopping
+            # Early stopping on macro-F1
             if self.patience_counter >= args.patience:
-                print(f"Early stopping at epoch {epoch} (patience={args.patience})")
+                print(f"Early stopping at epoch {epoch} "
+                      f"(patience={args.patience}, best_F1={self.best_f1:.4f})")
                 break
 
-        print(f"\nBest {self.phase} result: acc={self.best_acc:.4f} f1={self.best_f1:.4f}")
+        print(f"\nBest {self.phase} result: acc={self.best_acc:.4f} F1={self.best_f1:.4f}")
         self.csv_file.close()
 
     def _train_loso(self):
@@ -1218,10 +1249,9 @@ class CrossDatasetTrainer:
             self._setup_optimizer()
             self._setup_scheduler()
 
-            # Train fold
+            # Train fold — early stopping on val macro-F1
             best_fold_acc = 0.0
             best_fold_f1 = 0.0
-            best_fold_loss = float('inf')
             patience_counter = 0
 
             for epoch in range(1, args.epochs + 1):
@@ -1281,21 +1311,21 @@ class CrossDatasetTrainer:
                           f"Train Acc: {train_acc:.4f} | "
                           f"Val Acc: {val_acc:.4f} F1: {val_f1:.4f}")
 
-                if val_loss < best_fold_loss:
-                    best_fold_loss = val_loss
-                    best_fold_acc = val_acc
+                # Early stopping on macro-F1 (higher is better)
+                if val_f1 > best_fold_f1:
                     best_fold_f1 = val_f1
+                    best_fold_acc = val_acc
                     patience_counter = 0
                 else:
                     patience_counter += 1
 
                 if patience_counter >= args.patience:
-                    print(f"  Early stop at epoch {epoch}")
+                    print(f"  Early stop at epoch {epoch} (best_F1={best_fold_f1:.4f})")
                     break
 
             all_fold_accs.append(best_fold_acc)
             all_fold_f1s.append(best_fold_f1)
-            print(f"  Fold result: acc={best_fold_acc:.4f} f1={best_fold_f1:.4f}")
+            print(f"  Fold result: acc={best_fold_acc:.4f} F1={best_fold_f1:.4f}")
 
         # Summary
         if all_fold_accs:

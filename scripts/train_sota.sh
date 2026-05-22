@@ -2,7 +2,7 @@
 # Censor SOTA Training Pipeline on AutoDL
 # ==========================================
 # Phase 1: Joint pretrain on CASME2 + SMIC + SAMM
-# Phase 2: Fine-tune on CASME2 with LOSO
+# Phase 2: Generalize — LOSO on each dataset separately
 #
 # Usage:
 #   bash scripts/train_sota.sh
@@ -10,7 +10,7 @@
 # Prerequisites:
 #   - CASME2 at /root/autodl-tmp/data/CASME2 (with cropped/ and labels.csv)
 #   - SMIC at /root/autodl-tmp/data/SMIC
-#   - SAMM at /root/autodl-tmp/data/SAMM
+#   - SAMM at /root/data/SAMM
 
 set -e
 
@@ -19,7 +19,7 @@ set -e
 # ============================
 CASME_ROOT="/root/autodl-tmp/data/CASME2"
 SMIC_ROOT="/root/autodl-tmp/data/SMIC"
-SAMM_ROOT="/root/autodl-tmp/data/SAMM"
+SAMM_ROOT="/root/data/SAMM"
 
 SAVE_DIR="./checkpoints"
 LOG_DIR="./logs"
@@ -58,17 +58,18 @@ echo "Phase 1 complete. Best checkpoint: $SAVE_DIR/pretrain/pretrain_best.pth"
 echo ""
 
 # ============================
-# Phase 2: Fine-tune on CASME2 (LOSO)
+# Phase 2: Generalize (LOSO on each dataset)
 # ============================
 echo "=========================================="
-echo " Phase 2: Fine-tune on CASME2 (LOSO)"
+echo " Phase 2: Generalize (LOSO per dataset)"
 echo "=========================================="
 
 python train_cross.py \
-    --phase finetune \
-    --target_dataset casme2 \
-    --casme_root $CASME_ROOT \
+    --phase generalize \
     --pretrained $SAVE_DIR/pretrain/pretrain_best.pth \
+    --casme_root $CASME_ROOT \
+    --smic_root $SMIC_ROOT \
+    --samm_root $SAMM_ROOT \
     --loso \
     --epochs 50 \
     --batch_size 8 \
@@ -83,11 +84,11 @@ python train_cross.py \
     --mixup_alpha 0.1 \
     --supcon_weight 0.05 \
     --label_smoothing 0.05 \
-    --save_dir $SAVE_DIR/finetune_casme2 \
-    --log_dir $LOG_DIR/finetune_casme2
+    --save_dir $SAVE_DIR/generalize \
+    --log_dir $LOG_DIR/generalize
 
 echo ""
 echo "=========================================="
 echo " Training Complete!"
 echo "=========================================="
-echo "Results saved to: $LOG_DIR/finetune_casme2/loso_results.txt"
+echo "Results saved to: $LOG_DIR/generalize/generalize_results.txt"

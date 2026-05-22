@@ -1,20 +1,21 @@
 """
-Censor -- Multi-Dataset Joint Pretrain + Fine-tune
-====================================================
+Censor -- Multi-Dataset Joint Pretrain + Generalization Evaluation
+====================================================================
 SOTA training pipeline for micro-expression recognition.
 
 Strategy:
   Phase 1: Joint pretrain on CASME2 + SMIC + SAMM (unified 5-class)
-  Phase 2: Fine-tune on target dataset (CASME2 LOSO)
+  Phase 2: Generalize — LOSO on each dataset separately
 
 Key SOTA techniques:
-  - ArcFace angular margin loss
+  - ArcFace angular margin loss (with dynamic class weights)
   - Manifold MixUp in feature space
   - Supervised Contrastive (SupCon) loss
-  - LOSO (Leave-One-Subject-Out) evaluation
+  - LOSO (Leave-One-Subject-Out) evaluation per dataset
   - Differential LR (backbone 10x smaller than head)
   - Warmup + Cosine annealing scheduler
   - Gradient accumulation for effective larger batch
+  - Kinetics-400 pretrained backbone initialization
 
 Usage:
   # Phase 1: Joint pretrain (all 3 datasets)
@@ -22,20 +23,22 @@ Usage:
       --casme_root /root/autodl-tmp/data/CASME2 \
       --smic_root /root/autodl-tmp/data/SMIC \
       --samm_root /root/autodl-tmp/data/SAMM \
-      --use_arcface --arcface_margin 0.2 \
-      --mixup_alpha 0.2 --supcon_weight 0.1
+      --pretrained_backbone --use_arcface --arcface_margin 0.2 \
+      --mixup_alpha 0.2 --supcon_weight 0.1 --weight_decay 0.0
 
-  # Phase 2: Fine-tune on CASME2 with LOSO
-  python train_cross.py --phase finetune \
+  # Phase 2: Generalize (LOSO on each dataset)
+  python train_cross.py --phase generalize \
+      --pretrained checkpoints/pretrain/pretrain_best.pth \
       --casme_root /root/autodl-tmp/data/CASME2 \
-      --pretrained pretrained_joint_best.pth \
-      --loso --use_arcface --lr 1e-4
+      --samm_root /root/data/SAMM \
+      --loso --use_arcface --weight_decay 0.0
 
-  # Phase 2 alt: Fine-tune on SMIC
+  # Phase 2 alt: Fine-tune on single dataset
   python train_cross.py --phase finetune \
-      --smic_root /root/autodl-tmp/data/SMIC \
-      --pretrained pretrained_joint_best.pth \
-      --use_arcface --lr 1e-4
+      --target_dataset casme2 \
+      --casme_root /root/autodl-tmp/data/CASME2 \
+      --pretrained checkpoints/pretrain/pretrain_best.pth \
+      --loso --use_arcface --lr 1e-4
 """
 
 import os
@@ -51,7 +54,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, ConcatDataset
+from torch.utils.data import DataLoader, ConcatDataset, Subset
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -202,17 +205,12 @@ def manifold_mixup(feat, y_me, y_au, alpha=0.2):
 # =============================================================================
 
 class CrossDatasetTrainer:
-    """
-    Multi-dataset joint pretrain + fine-tune trainer.
-
-    Phase 1 (pretrain): CASME2 + SMIC + SAMM joint training, unified 5-class
-    Phase 2 (finetune): Single dataset fine-tuning, LOSO or random split
-    """
+    """Multi-dataset joint pretrain + generalization evaluation trainer."""
 
     def __init__(self, args):
         self.args = args
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.phase = args.phase  # 'pretrain' or 'finetune'
+        self.phase = args.phase  # pretrain / finetune / generalize
 
         # Build model
         print(f"\n[Censor] Building model (phase={self.phase})...")
@@ -253,9 +251,14 @@ class CrossDatasetTrainer:
             'arcface': args.arcface_weight,
         }
 
-        # Load pretrained checkpoint for finetune
-        if self.phase == 'finetune' and args.pretrained:
+        # Load pretrained checkpoint for finetune/generalize
+        if self.phase in ('finetune', 'generalize') and args.pretrained:
             self._load_pretrained(args.pretrained)
+
+        # For generalize: defer dataset/optimizer/scheduler setup to per-dataset
+        if self.phase == 'generalize':
+            self._setup_csv_logger('generalize')
+            return
 
         # Optimizer with differential LR
         self._setup_optimizer()
@@ -273,9 +276,11 @@ class CrossDatasetTrainer:
         self.patience_counter = 0
 
         # CSV logger
-        csv_path = args.log_dir or './logs'
+        self._setup_csv_logger(self.phase)
+
+    def _setup_csv_logger(self, phase_tag):
+        csv_path = self.args.log_dir or './logs'
         os.makedirs(csv_path, exist_ok=True)
-        phase_tag = 'pretrain' if self.phase == 'pretrain' else 'finetune'
         self.csv_file = open(os.path.join(csv_path, f'{phase_tag}_log.csv'), 'w', newline='')
         self.csv_writer = csv.writer(self.csv_file)
         self.csv_writer.writerow([
@@ -347,12 +352,14 @@ class CrossDatasetTrainer:
 
     def _setup_optimizer(self):
         """Differential LR: backbone 10x smaller than head."""
+        self.optimizer = self._build_optimizer()
+
+    def _build_optimizer(self):
+        """Build optimizer with differential LR."""
         backbone_params = []
         head_params = []
 
-        # Identify backbone vs head modules
         backbone_names = {'fast_pathway', 'slow_pathway', 'saliency', 'rppg', 'flow'}
-        head_names = {'amygdala', 'ffa', 'casa', 'fusion', 'au_decoder', 'moe', 'radar'}
 
         for name, param in self.model.named_parameters():
             if not param.requires_grad:
@@ -370,24 +377,14 @@ class CrossDatasetTrainer:
             {'params': head_params, 'lr': lr, 'name': 'head'},
         ]
 
-        # Add ArcFace params to head group
         if self.use_arcface:
             param_groups.append({
                 'params': self.arcface_loss.parameters(),
                 'lr': lr, 'name': 'arcface'
             })
 
-        self.optimizer = torch.optim.AdamW(
-            param_groups,
-            weight_decay=self.args.weight_decay,
-        )
-
-        total_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-        backbone_count = sum(p.numel() for p in backbone_params)
-        head_count = sum(p.numel() for p in head_params)
-        print(f"[Trainer] Total trainable: {total_params:,}")
-        print(f"[Trainer]   Backbone: {backbone_count:,} (lr={backbone_lr:.2e})")
-        print(f"[Trainer]   Head:     {head_count:,} (lr={lr:.2e})")
+        optimizer = torch.optim.AdamW(param_groups, weight_decay=self.args.weight_decay)
+        return optimizer
 
     def _setup_datasets(self):
         """Setup datasets for current phase."""
@@ -662,20 +659,287 @@ class CrossDatasetTrainer:
         acc = correct / max(1, total)
 
         # Compute F1
-        from sklearn.metrics import f1_score
+        from sklearn.metrics import f1_score, accuracy_score
         f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
 
         return avg_loss, acc, f1
 
     def train(self):
         """Main training loop."""
-        args = self.args
-
-        if args.loso and self.phase == 'finetune':
+        if self.phase == 'generalize':
+            self._run_generalize()
+        elif self.args.loso and self.phase == 'finetune':
             self._train_loso()
         else:
             self._train_standard()
 
+    # ================================================================
+    # Generalize: LOSO on each dataset separately
+    # ================================================================
+    def _run_generalize(self):
+        """Run LOSO evaluation on each available dataset to measure generalization.
+
+        For each dataset:
+        1. Create dataset with UNIFIED_EMOTION_MAP
+        2. Determine actual num_classes from label distribution
+        3. Rebuild MoE head + ArcFace for that num_classes
+        4. Load pretrained checkpoint
+        5. Run LOSO
+        6. Save per-dataset results
+        """
+        args = self.args
+        all_results = {}
+
+        # Determine which datasets are available
+        datasets_to_eval = []
+        if args.casme_root and os.path.isdir(args.casme_root):
+            datasets_to_eval.append('casme2')
+        if args.smic_root and os.path.isdir(args.smic_root):
+            datasets_to_eval.append('smic')
+        if args.samm_root and os.path.isdir(args.samm_root):
+            datasets_to_eval.append('samm')
+
+        if not datasets_to_eval:
+            raise ValueError("No dataset roots provided. Use --casme_root, --smic_root, --samm_root")
+
+        print(f"\n{'='*60}")
+        print(f" Generalization Evaluation: {', '.join(datasets_to_eval)}")
+        print(f" Pretrained: {args.pretrained}")
+        print(f"{'='*60}")
+
+        for dataset_name in datasets_to_eval:
+            print(f"\n{'='*60}")
+            print(f" Evaluating on: {dataset_name.upper()}")
+            print(f"{'='*60}")
+
+            # 1. Create dataset
+            dataset = self._create_dataset(dataset_name)
+            if dataset is None or len(dataset) == 0:
+                print(f"[Skip] {dataset_name}: no valid samples")
+                continue
+
+            # 2. Determine actual num_classes from dataset labels
+            all_labels = []
+            for i in range(len(dataset)):
+                sample = dataset[i]
+                label = sample['me_label']
+                if isinstance(label, torch.Tensor):
+                    label = label.item()
+                all_labels.append(int(label))
+            unique_labels = sorted(set(all_labels))
+            num_classes = len(unique_labels)
+            label_map = {old: new for new, old in enumerate(unique_labels)}
+
+            print(f"  Samples: {len(dataset)}")
+            print(f"  Original labels: {unique_labels}")
+            print(f"  Remapped to: 0..{num_classes-1}")
+            for lbl in unique_labels:
+                emotion_name = [k for k, v in UNIFIED_EMOTION_MAP.items() if v == lbl]
+                count = all_labels.count(lbl)
+                name = emotion_name[0] if emotion_name else f'class_{lbl}'
+                print(f"    {name}({lbl}): {count} samples → remapped to {label_map[lbl]}")
+
+            # 3. Rebuild model for this dataset's class count
+            # Reload fresh pretrained weights
+            self._load_pretrained(args.pretrained)
+            self._adjust_moe_for_classes(num_classes)
+
+            # Rebuild ArcFace
+            if self.use_arcface:
+                self.arcface_loss = ArcFaceLoss(
+                    in_features=1024, out_features=num_classes,
+                    margin=self.arcface_margin, scale=30.0
+                ).to(self.device)
+
+            # 4. Run LOSO
+            results = self._run_loso_for_dataset(dataset, num_classes, label_map, dataset_name)
+            all_results[dataset_name] = results
+
+            # Print summary
+            print(f"\n  {dataset_name.upper()} LOSO Results:")
+            print(f"    Mean Acc: {results['mean_acc']:.4f}")
+            print(f"    Mean F1:  {results['mean_f1']:.4f}")
+            print(f"    Per-fold: {results['fold_accs']}")
+
+        # Final summary
+        print(f"\n{'='*60}")
+        print(f" GENERALIZATION SUMMARY")
+        print(f"{'='*60}")
+        for name, res in all_results.items():
+            print(f"  {name.upper():8s} | Acc: {res['mean_acc']:.4f} | F1: {res['mean_f1']:.4f}")
+
+        # Save results
+        results_path = args.log_dir or './logs'
+        os.makedirs(results_path, exist_ok=True)
+        with open(os.path.join(results_path, 'generalize_results.txt'), 'w') as f:
+            f.write("Generalization Evaluation Results\n")
+            f.write("=" * 50 + "\n")
+            for name, res in all_results.items():
+                f.write(f"\n{name.upper()}\n")
+                f.write(f"  Mean Acc: {res['mean_acc']:.4f}\n")
+                f.write(f"  Mean F1:  {res['mean_f1']:.4f}\n")
+                f.write(f"  Per-fold Acc: {res['fold_accs']}\n")
+                f.write(f"  Per-fold F1:  {res['fold_f1s']}\n")
+
+        print(f"\nResults saved to: {results_path}/generalize_results.txt")
+        return all_results
+
+    def _create_dataset(self, dataset_name):
+        """Create dataset for a given dataset name."""
+        args = self.args
+        if dataset_name == 'casme2':
+            return CASME2FrameDataset(
+                root_dir=args.casme_root,
+                emotion_map=UNIFIED_EMOTION_MAP,
+                exclude_negative=True,
+                n_frames=16,
+            )
+        elif dataset_name == 'smic':
+            return SMICFrameDataset(
+                root_dir=args.smic_root,
+                emotion_map=UNIFIED_EMOTION_MAP,
+                n_frames=16,
+            )
+        elif dataset_name == 'samm':
+            return SAMMFrameDataset(
+                root_dir=args.samm_root,
+                emotion_map=UNIFIED_EMOTION_MAP,
+                n_frames=16,
+            )
+        return None
+
+    def _run_loso_for_dataset(self, dataset, num_classes, label_map, dataset_name):
+        """Run LOSO cross-validation on a single dataset.
+
+        Args:
+            dataset: Dataset object with get_subject() method
+            num_classes: Number of classes after remapping
+            label_map: Dict mapping original labels to 0..num_classes-1
+            dataset_name: Name for logging
+        """
+        args = self.args
+
+        # Collect subjects
+        subjects = sorted(set(dataset.get_subject(i) for i in range(len(dataset))))
+        print(f"  LOSO: {len(subjects)} subjects, {len(dataset)} samples")
+
+        fold_accs = []
+        fold_f1s = []
+
+        for fold_idx, test_subject in enumerate(subjects):
+            print(f"\n  --- Fold {fold_idx+1}/{len(subjects)}: test_subject={test_subject} ---")
+
+            # Split by subject
+            train_indices = [i for i in range(len(dataset))
+                            if dataset.get_subject(i) != test_subject]
+            test_indices = [i for i in range(len(dataset))
+                           if dataset.get_subject(i) == test_subject]
+
+            if len(train_indices) == 0 or len(test_indices) == 0:
+                print(f"    Skip fold (train={len(train_indices)}, test={len(test_indices)})")
+                continue
+
+            train_subset = Subset(dataset, train_indices)
+            test_subset = Subset(dataset, test_indices)
+
+            # Remap labels in collate
+            train_loader = DataLoader(train_subset, batch_size=args.batch_size,
+                                     shuffle=True, num_workers=4, pin_memory=True,
+                                     collate_fn=lambda batch: self._remap_collate(batch, label_map))
+            test_loader = DataLoader(test_subset, batch_size=args.batch_size,
+                                    shuffle=False, num_workers=4, pin_memory=True,
+                                    collate_fn=lambda batch: self._remap_collate(batch, label_map))
+
+            # Reset model for this fold
+            self._load_pretrained(args.pretrained)
+            self._adjust_moe_for_classes(num_classes)
+            if self.use_arcface:
+                self.arcface_loss = ArcFaceLoss(
+                    in_features=1024, out_features=num_classes,
+                    margin=self.arcface_margin, scale=30.0
+                ).to(self.device)
+
+            optimizer = self._build_optimizer()
+            scheduler = self._build_scheduler(optimizer, len(train_loader))
+
+            # Train this fold
+            best_fold_acc = 0.0
+            best_fold_f1 = 0.0
+            best_fold_loss = float('inf')
+            patience_counter = 0
+
+            for epoch in range(args.epochs):
+                train_loss = self._train_epoch(train_loader, optimizer, num_classes)
+
+                # Validate
+                val_loss, val_acc, val_f1 = self._validate_epoch(
+                    test_loader, num_classes)
+
+                current_lr = optimizer.param_groups[0]['lr']
+                if scheduler:
+                    scheduler.step()
+
+                print(f"    Epoch {epoch+1}/{args.epochs} | "
+                      f"Loss: {train_loss:.4f} | "
+                      f"Val Loss: {val_loss:.4f} | "
+                      f"Val Acc: {val_acc:.4f} | "
+                      f"Val F1: {val_f1:.4f} | "
+                      f"LR: {current_lr:.6f}")
+
+                # Early stopping on val_loss
+                if val_loss < best_fold_loss:
+                    best_fold_loss = val_loss
+                    best_fold_acc = val_acc
+                    best_fold_f1 = val_f1
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= args.patience:
+                        print(f"    Early stop at epoch {epoch+1}")
+                        break
+
+            fold_accs.append(best_fold_acc)
+            fold_f1s.append(best_fold_f1)
+            print(f"    Best fold acc: {best_fold_acc:.4f}, F1: {best_fold_f1:.4f}")
+
+        # Aggregate
+        mean_acc = np.mean(fold_accs) if fold_accs else 0.0
+        mean_f1 = np.mean(fold_f1s) if fold_f1s else 0.0
+
+        return {
+            'mean_acc': mean_acc,
+            'mean_f1': mean_f1,
+            'fold_accs': fold_accs,
+            'fold_f1s': fold_f1s,
+        }
+
+    def _remap_collate(self, batch, label_map):
+        """Collate function that remaps labels to 0..num_classes-1."""
+        frames_list = []
+        labels_list = []
+        subjects_list = []
+
+        for item in batch:
+            frames_list.append(item['frames'])
+            label = item['me_label']
+            if isinstance(label, torch.Tensor):
+                label = label.item()
+            # Remap label
+            labels_list.append(label_map.get(int(label), 0))
+            subjects_list.append(item.get('subject', ''))
+
+        frames = torch.stack(frames_list)
+        labels = torch.tensor(labels_list, dtype=torch.long)
+
+        return {
+            'frames': frames,
+            'me_label': labels,
+            'subject': subjects_list,
+        }
+
+    # ================================================================
+    # Standard training
+    # ================================================================
     def _train_standard(self):
         """Standard training loop (pretrain or finetune with random split)."""
         args = self.args
@@ -932,8 +1196,8 @@ def parse_args():
 
     # Phase
     parser.add_argument('--phase', type=str, default='pretrain',
-                        choices=['pretrain', 'finetune'],
-                        help='Training phase: pretrain (joint) or finetune (single)')
+                        choices=['pretrain', 'finetune', 'generalize'],
+                        help='Training phase: pretrain (joint), finetune (single), generalize (LOSO on all datasets)')
 
     # Dataset roots
     parser.add_argument('--casme_root', type=str, default=None,

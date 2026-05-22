@@ -212,6 +212,7 @@ class CrossDatasetTrainer:
             diff_mode=True,
             verbose=False,
             enable_sparse_control=False,
+            pretrained_backbone=getattr(args, 'pretrained_backbone', False),
         ).to(self.device)
 
         # Adjust MoE head for unified 5-class if pretraining
@@ -982,6 +983,10 @@ def parse_args():
     parser.add_argument('--save_dir', type=str, default=None)
     parser.add_argument('--log_dir', type=str, default=None)
     parser.add_argument('--seed', type=int, default=42)
+
+    # Pretrained backbone (Kinetics-400)
+    parser.add_argument('--pretrained_backbone', action='store_true',
+                        help='Initialize backbones with Kinetics-400 pretrained weights')
 
     return parser.parse_args()
 

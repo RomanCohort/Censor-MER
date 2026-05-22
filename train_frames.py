@@ -937,6 +937,10 @@ def parse_args():
     parser.add_argument('--enable_sparse_control', action='store_true',
                         help='Enable Long-Term Memory Sparse Control (off by default)')
 
+    # Pretrained backbone (Kinetics-400)
+    parser.add_argument('--pretrained_backbone', action='store_true',
+                        help='Initialize backbones with Kinetics-400 pretrained weights')
+
     # ArcFace loss
     parser.add_argument('--use_arcface', action='store_true',
                         help='Use ArcFace angular margin loss instead of FocalLoss for ME classification')
@@ -964,7 +968,8 @@ def train_single_fold(args, fold_idx, loso_subjects=None):
         fast_preprocess=True,
         diff_mode=args.diff_mode,
         verbose=False,
-        enable_sparse_control=args.enable_sparse_control
+        enable_sparse_control=args.enable_sparse_control,
+        pretrained_backbone=args.pretrained_backbone
     )
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -1047,7 +1052,8 @@ if __name__ == '__main__':
         # Synthetic data test
         print("\nUsing synthetic data for testing...")
         model = Censor(fast_preprocess=True, verbose=False,
-                       enable_sparse_control=args.enable_sparse_control)
+                       enable_sparse_control=args.enable_sparse_control,
+                       pretrained_backbone=args.pretrained_backbone)
         train_dataset = SyntheticMERDataset(num_samples=100, T=args.T, H=args.H, W=args.W)
         val_dataset = SyntheticMERDataset(num_samples=20, T=args.T, H=args.H, W=args.W)
         train_loader = DataLoader(train_dataset, batch_size=args.batch_size,

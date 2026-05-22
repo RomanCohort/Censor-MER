@@ -18,6 +18,55 @@ from einops import rearrange
 from config.defaults import FAST_PATHWAY_CONFIG, SLOW_PATHWAY_CONFIG
 
 
+def _load_kinetics400_resnet18():
+    """Load torchvision pretrained 3D ResNet-18 (Kinetics-400).
+
+    Returns state_dict with keys like 'layer1.0.conv1.weight', etc.
+    The final FC layer (400 classes) is excluded.
+    """
+    try:
+        from torchvision.models.video import r3d_18, R3D_18_Weights
+        model = r3d_18(weights=R3D_18_Weights.KINETICS400_V1)
+        return model.state_dict()
+    except (ImportError, AttributeError):
+        # Fallback: try older torchvision API
+        try:
+            from torchvision.models.video import r3d_18
+            model = r3d_18(pretrained=True)
+            return model.state_dict()
+        except Exception:
+            print("[Warning] Could not load pretrained R3D-18 from torchvision. "
+                  "Falling back to random initialization.")
+            return None
+
+
+def _load_kinetics400_swin3d():
+    """Load torchvision pretrained Video Swin Transformer (Kinetics-400).
+
+    Returns state_dict or None if unavailable.
+    """
+    try:
+        from torchvision.models.video import swin3d_t, Swin3D_T_Weights
+        model = swin3d_t(weights=Swin3D_T_Weights.KINETICS400_V1)
+        return model.state_dict()
+    except (ImportError, AttributeError):
+        try:
+            from torchvision.models.video import swin3d_t
+            model = swin3d_t(pretrained=True)
+            return model.state_dict()
+        except Exception:
+            pass
+    # Fallback: try timm
+    try:
+        import timm
+        model = timm.create_model('swin3d_base_patch244_window877_kinetics400', pretrained=True)
+        return model.state_dict()
+    except Exception:
+        print("[Warning] Could not load pretrained Video Swin3D. "
+              "Falling back to random initialization.")
+        return None
+
+
 # =============================================================================
 # 3D Window Partitioning Utilities
 # =============================================================================
@@ -376,7 +425,7 @@ class FastSubcorticalPathway(nn.Module):
     Input:  (B, 2, T, H, W) -- TV-L1 optical flow (x, y displacement)
     Output: (B, 512) -- fast pathway feature vector
     """
-    def __init__(self, config=None):
+    def __init__(self, config=None, pretrained=False):
         super().__init__()
         cfg = config or FAST_PATHWAY_CONFIG
         self.input_channels = cfg['input_channels']
@@ -404,6 +453,69 @@ class FastSubcorticalPathway(nn.Module):
         nn.init.xavier_uniform_(self.fc.weight)
         nn.init.constant_(self.fc.bias, 0)
 
+        if pretrained:
+            self._load_kinetics_pretrained()
+
+    def _load_kinetics_pretrained(self):
+        """Load Kinetics-400 pretrained 3D ResNet-18 weights.
+
+        Handles mismatches:
+        - Input channels: pretrained has 3 (RGB), ours has 2 (optical flow).
+          Solution: average RGB weights across channels for flow input.
+        - FC layer: pretrained has 400 classes, ours has output_dim=512.
+          Solution: skip FC layer.
+        - Layer structure: torchvision R3D-18 has 4 layers [64,128,256,512],
+          ours has 3 layers [64,128,256]. We load matching layers only.
+        """
+        pretrained_sd = _load_kinetics400_resnet18()
+        if pretrained_sd is None:
+            return
+
+        # Build mapping from torchvision keys to our keys
+        our_sd = self.state_dict()
+        loaded, skipped = 0, 0
+
+        # 1. Stem conv: pretrained (3,64,..) -> ours (2,64,..)
+        # Average first conv weights across RGB channels
+        if 'stem.0.weight' in pretrained_sd:
+            pretrained_stem = pretrained_sd['stem.0.weight']  # (64, 3, 3, 7, 7)
+            our_stem_shape = our_sd['stem.0.weight'].shape    # (64, 2, 3, 7, 7)
+            # Average channels: (64, 1, 3, 7, 7) then repeat for 2 channels
+            avg_weight = pretrained_stem.mean(dim=1, keepdim=True)  # (64, 1, 3, 7, 7)
+            our_sd['stem.0.weight'] = avg_weight.expand(our_stem_shape).clone()
+            loaded += 1
+
+        # Stem BN
+        for bn_key in ['stem.1.weight', 'stem.1.bias', 'stem.1.running_mean', 'stem.1.running_var']:
+            if bn_key in pretrained_sd and bn_key in our_sd:
+                our_sd[bn_key] = pretrained_sd[bn_key]
+                loaded += 1
+
+        # 2. ResNet layers: torchvision has layer1-layer4, we have layer1-layer3
+        # torchvision: layer1(64), layer2(128), layer3(256), layer4(512)
+        # ours:        layer1(64), layer2(128), layer3(256)
+        layer_mapping = {
+            'layer1': 'layer1',
+            'layer2': 'layer2',
+            'layer3': 'layer3',
+            # skip layer4 (we don't have it)
+        }
+
+        for tv_layer, our_layer in layer_mapping.items():
+            for key in pretrained_sd:
+                if key.startswith(tv_layer + '.'):
+                    our_key = key.replace(tv_layer + '.', our_layer + '.', 1)
+                    if our_key in our_sd and our_sd[our_key].shape == pretrained_sd[key].shape:
+                        our_sd[our_key] = pretrained_sd[key]
+                        loaded += 1
+                    else:
+                        skipped += 1
+
+        # Load the filtered state dict
+        self.load_state_dict(our_sd)
+        print(f"[FastSubcorticalPathway] Loaded Kinetics-400 pretrained weights: "
+              f"{loaded} params loaded, {skipped} skipped")
+
     def _make_layer(self, block, planes, blocks, stride):
         downsample = None
         if stride != (1, 1, 1) or self.in_planes != planes * block.expansion:
@@ -419,19 +531,13 @@ class FastSubcorticalPathway(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x):
-        print(f"[FastSubcorticalPathway] Input: {x.shape}")
         x = self.stem(x)
-        print(f"[FastSubcorticalPathway] After stem: {x.shape}")
         x = self.layer1(x)
-        print(f"[FastSubcorticalPathway] After layer1: {x.shape}")
         x = self.layer2(x)
-        print(f"[FastSubcorticalPathway] After layer2: {x.shape}")
         x = self.layer3(x)
-        print(f"[FastSubcorticalPathway] After layer3: {x.shape}")
         x = self.avgpool(x)
         x = x.flatten(1)
         feat = self.fc(x)
-        print(f"[FastSubcorticalPathway] Output: {feat.shape}")
         return feat
 
 
@@ -463,7 +569,7 @@ class SlowCorticalPathway(nn.Module):
             + (B, 768, T/16, H/32, W/32) -- spatial feature map for CASANet
     """
 
-    def __init__(self, config=None):
+    def __init__(self, config=None, pretrained=False):
         super().__init__()
         cfg = config or SLOW_PATHWAY_CONFIG
 
@@ -534,6 +640,63 @@ class SlowCorticalPathway(nn.Module):
         nn.init.xavier_uniform_(self.fc.weight)
         nn.init.constant_(self.fc.bias, 0)
 
+        if pretrained:
+            self._load_kinetics_pretrained()
+
+    def _load_kinetics_pretrained(self):
+        """Load Kinetics-400 pretrained Video Swin Transformer weights.
+
+        Handles mismatches:
+        - Input channels: pretrained has 3 (RGB), ours has 6 (RGB+rPPG).
+          Solution: copy RGB weights to first 3 channels, zero-init rPPG channels.
+        - FC layer: skip (different output dim).
+        - Architecture differences: load matching keys only, skip mismatches.
+        """
+        pretrained_sd = _load_kinetics400_swin3d()
+        if pretrained_sd is None:
+            return
+
+        our_sd = self.state_dict()
+        loaded, skipped = 0, 0
+
+        for key, val in pretrained_sd.items():
+            # Skip classification head
+            if 'head.' in key or 'fc.' in key:
+                skipped += 1
+                continue
+
+            # Handle patch_embed input channel mismatch (3 -> 6)
+            if key == 'patch_embed.proj.weight':
+                our_key = 'patch_embed.weight'
+                if our_key in our_sd:
+                    # pretrained: (C_out, 3, t, h, w), ours: (C_out, 6, t, h, w)
+                    our_shape = our_sd[our_key].shape
+                    new_weight = torch.zeros(our_shape)
+                    new_weight[:, :3, ...] = val[:, :3, ...]  # copy RGB
+                    # rPPG channels initialized to zero (will learn)
+                    our_sd[our_key] = new_weight
+                    loaded += 1
+                continue
+
+            # Map timm key names to our key names
+            our_key = key
+            # timm uses 'patch_embed.proj' -> we use 'patch_embed'
+            our_key = our_key.replace('patch_embed.proj.', 'patch_embed.')
+            # timm uses 'patch_embed.norm' -> we use 'patch_norm'
+            our_key = our_key.replace('patch_embed.norm.', 'patch_norm.')
+            # timm uses 'layers' -> we use 'stages' with different structure
+            # Our architecture is custom, so many timm keys won't match directly
+
+            if our_key in our_sd and our_sd[our_key].shape == val.shape:
+                our_sd[our_key] = val
+                loaded += 1
+            else:
+                skipped += 1
+
+        self.load_state_dict(our_sd)
+        print(f"[SlowCorticalPathway] Loaded Kinetics-400 pretrained weights: "
+              f"{loaded} params loaded, {skipped} skipped (architecture mismatch expected)")
+
     def forward(self, x):
         """
         Args:
@@ -542,23 +705,18 @@ class SlowCorticalPathway(nn.Module):
             pooled (torch.Tensor): Global pooled features, shape (B, 768)
             spatial_map (torch.Tensor): Spatial feature map for CASANet, shape (B, 768, T/16, H/32, W/32)
         """
-        print(f"[SlowCorticalPathway] Input: {x.shape}")
-
         # Patch embedding
         x = self.patch_embed(x)
         B, C, T_p, H_p, W_p = x.shape
         x = x.permute(0, 2, 3, 4, 1)
         x = self.patch_norm(x)
         x = x.permute(0, 4, 1, 2, 3)
-        print(f"[SlowCorticalPathway] After patch embed: {x.shape}")
 
         # Pass through stages
         spatial_map = None
         for stage_idx, (stage_blocks, stage_merge) in enumerate(zip(self.stages, self.stage_merges)):
             # Apply patch merging first
             x = stage_merge(x)
-            if stage_idx < 3:
-                print(f"[SlowCorticalPathway] After stage {stage_idx+1} merge: {x.shape}")
 
             # Capture spatial map after stage 4 merge (idx 3)
             if stage_idx == 3:
@@ -568,12 +726,9 @@ class SlowCorticalPathway(nn.Module):
             for block in stage_blocks:
                 x = block(x)
 
-        print(f"[SlowCorticalPathway] Final spatial map: {spatial_map.shape}")
-
         # Global pooling
         pooled = self.avgpool(x)
         pooled = pooled.flatten(1)
         pooled = self.fc(pooled)
 
-        print(f"[SlowCorticalPathway] Output pooled: {pooled.shape}")
         return pooled, spatial_map

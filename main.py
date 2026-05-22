@@ -76,7 +76,8 @@ class Censor(nn.Module):
     """
 
     def __init__(self, fast_preprocess=False, diff_mode=False, verbose=True,
-                 enable_sparse_control=False, return_features=False):
+                 enable_sparse_control=False, return_features=False,
+                 pretrained_backbone=False):
         super().__init__()
 
         self.fast_preprocess = fast_preprocess
@@ -84,6 +85,7 @@ class Censor(nn.Module):
         self.verbose = verbose
         self.enable_sparse_control = enable_sparse_control
         self.return_features = return_features
+        self.pretrained_backbone = pretrained_backbone
 
         # =====================================================================
         # Stage 1: Biomimetic Preprocessing
@@ -101,8 +103,8 @@ class Censor(nn.Module):
         # Stage 2: Dual-Pathway Backbones
         # =====================================================================
         print("[Censor] Initializing Dual-Pathway Backbones...")
-        self.fast_pathway = FastSubcorticalPathway(FAST_PATHWAY_CONFIG)
-        self.slow_pathway = SlowCorticalPathway(SLOW_PATHWAY_CONFIG)
+        self.fast_pathway = FastSubcorticalPathway(FAST_PATHWAY_CONFIG, pretrained=pretrained_backbone)
+        self.slow_pathway = SlowCorticalPathway(SLOW_PATHWAY_CONFIG, pretrained=pretrained_backbone)
 
         # =====================================================================
         # Stage 3: Fusiform-Amygdala Attention Circuit

@@ -36,11 +36,12 @@ python train_cross.py \
     --casme_root $CASME_ROOT \
     --smic_root $SMIC_ROOT \
     --samm_root $SAMM_ROOT \
+    --pretrained_backbone \
     --epochs 80 \
     --batch_size 8 \
     --lr 3e-4 \
     --backbone_lr_factor 0.1 \
-    --weight_decay 0.05 \
+    --weight_decay 0.0 \
     --warmup_epochs 5 \
     --patience 20 \
     --grad_accum_steps 2 \
@@ -73,7 +74,7 @@ python train_cross.py \
     --batch_size 8 \
     --lr 1e-4 \
     --backbone_lr_factor 0.1 \
-    --weight_decay 0.05 \
+    --weight_decay 0.0 \
     --warmup_epochs 3 \
     --patience 15 \
     --grad_accum_steps 2 \

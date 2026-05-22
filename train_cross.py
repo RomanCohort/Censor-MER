@@ -156,8 +156,12 @@ class SupConLoss(nn.Module):
 
 
 class ArcFaceLoss(nn.Module):
-    """ArcFace: Additive Angular Margin Loss with dynamic class weighting."""
-    def __init__(self, in_features, out_features, margin=0.2, scale=30.0):
+    """ArcFace: Additive Angular Margin Loss.
+
+    For small datasets (4 classes, <300 samples), use smaller scale (16)
+    to prevent gradient explosion. Large-scale face recognition uses 30-64.
+    """
+    def __init__(self, in_features, out_features, margin=0.2, scale=16.0):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -191,16 +195,7 @@ class ArcFaceLoss(nn.Module):
         final_cosine = one_hot * output + (1.0 - one_hot) * cosine
         logits = self.scale * final_cosine
 
-        # Dynamic class weights from batch label frequencies
-        if class_weights is None:
-            freq = torch.zeros(self.out_features, device=labels.device)
-            for c in range(self.out_features):
-                freq[c] = (labels == c).sum().float()
-            freq = freq.clamp(min=1.0)
-            class_weights = 1.0 / freq
-            class_weights = class_weights / class_weights.sum() * self.out_features
-
-        return F.cross_entropy(logits, labels, weight=class_weights)
+        return F.cross_entropy(logits, labels)
 
 
 # =============================================================================
@@ -260,9 +255,9 @@ class CrossDatasetTrainer:
                 in_features=1024,
                 out_features=self.num_classes,
                 margin=args.arcface_margin,
-                scale=30.0,
+                scale=args.arcface_scale,
             ).to(self.device)
-            print(f"[Trainer] ArcFace enabled (margin={args.arcface_margin}, classes={self.num_classes})")
+            print(f"[Trainer] ArcFace enabled (margin={args.arcface_margin}, scale={args.arcface_scale}, classes={self.num_classes})")
 
         # SupCon
         self.supcon_loss = SupConLoss(temperature=0.07)
@@ -916,7 +911,7 @@ class CrossDatasetTrainer:
             if self.use_arcface:
                 self.arcface_loss = ArcFaceLoss(
                     in_features=1024, out_features=num_classes,
-                    margin=self.arcface_margin, scale=30.0
+                    margin=self.arcface_margin, scale=self.args.arcface_scale
                 ).to(self.device)
 
             # 4. Run LOSO
@@ -1024,7 +1019,7 @@ class CrossDatasetTrainer:
             if self.use_arcface:
                 self.arcface_loss = ArcFaceLoss(
                     in_features=1024, out_features=num_classes,
-                    margin=self.arcface_margin, scale=30.0
+                    margin=self.arcface_margin, scale=self.args.arcface_scale
                 ).to(self.device)
 
             optimizer = self._build_optimizer()

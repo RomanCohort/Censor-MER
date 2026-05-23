@@ -77,7 +77,7 @@ class Censor(nn.Module):
 
     def __init__(self, fast_preprocess=False, diff_mode=False, verbose=True,
                  enable_sparse_control=False, return_features=False,
-                 pretrained_backbone=False):
+                 pretrained_backbone=False, single_path=None):
         super().__init__()
 
         self.fast_preprocess = fast_preprocess
@@ -86,6 +86,11 @@ class Censor(nn.Module):
         self.enable_sparse_control = enable_sparse_control
         self.return_features = return_features
         self.pretrained_backbone = pretrained_backbone
+
+        # Single-path mode for ablation study
+        self.single_path = single_path  # None, 'fast', or 'slow'
+        if single_path:
+            print(f"[Censor] ABLATION: Single-path mode ({single_path})")
 
         # =====================================================================
         # Stage 1: Biomimetic Preprocessing
@@ -119,6 +124,12 @@ class Censor(nn.Module):
         # =====================================================================
         print("[Censor] Initializing TSFmicroFusion...")
         self.fusion = TSFmicroFusion(FUSION_CONFIG)
+
+        # Single-path projection layers (project to fused_dim=1024)
+        if single_path == 'fast':
+            self.single_path_proj = nn.Linear(512, 1024)
+        elif single_path == 'slow':
+            self.single_path_proj = nn.Linear(768, 1024)
 
         # =====================================================================
         # Stage 4.5: Long-Term Memory Sparse Control (Multi-Stage)
@@ -258,6 +269,34 @@ class Censor(nn.Module):
         # Input: (B, 6, T, H, W) -> Output: (B, 768) pooled + (B, 768, T/16, H/32, W/32) spatial
         rgb_rppg = torch.cat([x_salient, rppg_heatmap], dim=1)  # (B, 6, T, H, W)
         slow_feat, slow_spatial = self.slow_pathway(rgb_rppg)
+
+        # =====================================================================
+        # ABLATION: Single-path shortcut
+        # =====================================================================
+        if self.single_path:
+            if self.single_path == 'fast':
+                # Only FastPath: project 512 → 1024, skip fusion
+                fused_feat = self.single_path_proj(fast_feat)
+            else:
+                # Only SlowPath: project 768 → 1024, skip fusion
+                fused_feat = self.single_path_proj(slow_feat)
+            # Skip to Stage 5
+            apex_scores = torch.zeros(B, 1, device=x.device)
+            au_intensities, au_opd = self.au_decoder(fused_feat)
+            me_logits, expert_gates, moe_aux_loss = self.moe(fused_feat)
+            adapted_feat = self.radar(fused_feat)
+            template_reports, llm_reports = {}, {}
+            return {
+                'me_logits': me_logits,
+                'au_intensities': au_intensities,
+                'au_opd': au_opd,
+                'apex_scores': apex_scores,
+                'expert_gates': expert_gates,
+                'moe_aux_loss': moe_aux_loss,
+                'adapted_feat': adapted_feat,
+                'template_report': template_reports,
+                'llm_report': llm_reports,
+            }
 
         # =====================================================================
         # Stage 2.5: Sparse Control for Pathways

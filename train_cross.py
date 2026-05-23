@@ -247,6 +247,7 @@ class CrossDatasetTrainer:
             verbose=False,
             enable_sparse_control=False,
             pretrained_backbone=getattr(args, 'pretrained_backbone', False),
+            single_path=args.single_path,
         ).to(self.device)
 
         # Determine num_classes based on phase
@@ -1503,6 +1504,9 @@ def parse_args():
     # Pretrained backbone (Kinetics-400)
     parser.add_argument('--pretrained_backbone', action='store_true',
                         help='Initialize backbones with Kinetics-400 pretrained weights')
+    parser.add_argument('--single_path', type=str, default=None,
+                        choices=['fast', 'slow'],
+                        help='Ablation: use single pathway only (fast or slow)')
 
     return parser.parse_args()
 

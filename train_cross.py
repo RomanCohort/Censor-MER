@@ -255,7 +255,7 @@ class CrossDatasetTrainer:
         if self.phase == 'pretrain':
             self.num_classes = NUM_PRETRAIN_CLASSES  # 4 classes for pretrain
         elif self.phase == 'finetune':
-            self.num_classes = 4  # CASME2 default
+            self.num_classes = NUM_PRETRAIN_CLASSES  # Initial; will be overridden by _setup_datasets
         else:
             self.num_classes = NUM_PRETRAIN_CLASSES  # Will be reset per-dataset in generalize
 
@@ -290,9 +290,9 @@ class CrossDatasetTrainer:
         else:
             self.loss_weights = {
                 'me': 1.0,
-                'au': 0.1,
-                'moe': 0.01,
-                'landmark': 0.05,
+                'au': 0.0,    # No real AU labels in finetune — disable
+                'moe': 0.0,   # MoE aux loss hurts on small datasets
+                'landmark': 0.0,  # No AU labels → landmark loss is noise
                 'supcon': args.supcon_weight,
                 'arcface': args.arcface_weight,
             }
@@ -337,8 +337,32 @@ class CrossDatasetTrainer:
         ])
 
     def _adjust_moe_for_classes(self, num_classes):
-        """Adjust MoE head output for different number of classes."""
+        """Adjust MoE head output for different number of classes.
+
+        Only rebuilds experts and resets gate when num_classes actually changes.
+        Preserves pretrained weights when class count is unchanged.
+        """
+        # Handle no_moe mode — adjust simple_head instead
+        if getattr(self.model, 'no_moe', False):
+            if hasattr(self.model, 'simple_head') and self.model.simple_head is not None:
+                if self.model.simple_head.out_features != num_classes:
+                    old_head = self.model.simple_head
+                    self.model.simple_head = nn.Linear(old_head.in_features, num_classes).to(self.device)
+                    nn.init.xavier_uniform_(self.model.simple_head.weight)
+                    nn.init.zeros_(self.model.simple_head.bias)
+                    print(f"[Censor] Adjusted simple_head for {num_classes} classes")
+                else:
+                    print(f"[Censor] simple_head already has {num_classes} classes, skipping")
+            return
+
         moe = self.model.moe
+
+        # Check current output dim of experts — skip if already correct
+        current_out_features = moe.experts[0][-1].out_features
+        if current_out_features == num_classes:
+            print(f"[Censor] MoE already has {num_classes} classes, skipping adjustment")
+            return
+
         # Reinitialize the expert heads for new class count
         new_experts = nn.ModuleList()
         for i, expert in enumerate(moe.experts):
@@ -359,11 +383,11 @@ class CrossDatasetTrainer:
             nn.init.zeros_(new_expert[-1].bias)
             new_experts.append(new_expert)
         moe.experts = new_experts
-        # Reinitialize gating network
+        # Reinitialize gating network only when class count changes
         for layer in moe.gate:
             if hasattr(layer, 'reset_parameters'):
                 layer.reset_parameters()
-        print(f"[Censor] Adjusted MoE for {num_classes} classes")
+        print(f"[Censor] Adjusted MoE for {num_classes} classes (was {current_out_features})")
 
     def _load_pretrained(self, pretrained_path):
         """Load pretrained weights for fine-tuning."""
@@ -702,7 +726,10 @@ class CrossDatasetTrainer:
                 )
                 if lam < 1.0:
                     mixup_lam = lam
-                    me_logits_mix, _, _ = self.model.moe(mixed_feat)
+                    if getattr(self.model, 'no_moe', False):
+                        me_logits_mix = self.model.simple_head(mixed_feat)
+                    else:
+                        me_logits_mix, _, _ = self.model.moe(mixed_feat)
                     au_intensities_mix, _ = self.model.au_decoder(mixed_feat)
                     mixup_outputs = {
                         'me_logits': me_logits_mix,
@@ -821,7 +848,10 @@ class CrossDatasetTrainer:
                 )
                 if lam < 1.0:
                     mixup_lam = lam
-                    me_logits_mix, _, _ = self.model.moe(mixed_feat)
+                    if getattr(self.model, 'no_moe', False):
+                        me_logits_mix = self.model.simple_head(mixed_feat)
+                    else:
+                        me_logits_mix, _, _ = self.model.moe(mixed_feat)
                     au_intensities_mix, _ = self.model.au_decoder(mixed_feat)
                     mixup_outputs = {
                         'me_logits': me_logits_mix,
@@ -1295,7 +1325,13 @@ class CrossDatasetTrainer:
                 self._load_pretrained(args.pretrained)
             else:
                 # Reinitialize head only
-                for module in [self.model.moe, self.model.au_decoder, self.model.fusion]:
+                head_modules = []
+                if getattr(self.model, 'no_moe', False):
+                    head_modules.append(self.model.simple_head)
+                else:
+                    head_modules.append(self.model.moe)
+                head_modules.extend([self.model.au_decoder, self.model.fusion])
+                for module in head_modules:
                     for layer in module.modules():
                         if hasattr(layer, 'reset_parameters'):
                             layer.reset_parameters()
@@ -1334,7 +1370,10 @@ class CrossDatasetTrainer:
                         )
                         if lam < 1.0:
                             mixup_lam = lam
-                            me_logits_mix, _, _ = self.model.moe(mixed_feat)
+                            if getattr(self.model, 'no_moe', False):
+                                me_logits_mix = self.model.simple_head(mixed_feat)
+                            else:
+                                me_logits_mix, _, _ = self.model.moe(mixed_feat)
                             au_intensities_mix, _ = self.model.au_decoder(mixed_feat)
                             mixup_outputs = {
                                 'me_logits': me_logits_mix,

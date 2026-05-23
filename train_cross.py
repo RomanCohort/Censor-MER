@@ -1080,6 +1080,7 @@ class CrossDatasetTrainer:
                 best_f1 = val_f1
                 best_acc = val_acc
                 # Save best source model
+                os.makedirs(os.path.join(args.save_dir), exist_ok=True)
                 torch.save(self.model.state_dict(),
                           os.path.join(args.save_dir, f'cross_src_{source}_best.pth'))
 

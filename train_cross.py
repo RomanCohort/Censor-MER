@@ -306,6 +306,10 @@ class CrossDatasetTrainer:
             self._setup_csv_logger('generalize')
             return
 
+        if self.phase == 'cross_eval':
+            self._setup_csv_logger('cross_eval')
+            return
+
         # Setup datasets
         self._setup_datasets()
 

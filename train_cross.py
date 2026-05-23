@@ -985,8 +985,12 @@ class CrossDatasetTrainer:
         )
 
         # Filter to only shared classes
+        def get_label(ds, i):
+            lbl = ds[i]['me_label']
+            return lbl.item() if isinstance(lbl, torch.Tensor) else int(lbl)
+
         filtered_indices = [i for i in range(len(full_dataset))
-                           if full_dataset[i]['me_label'].item() >= 0]
+                           if get_label(full_dataset, i) >= 0]
         full_dataset = torch.utils.data.Subset(full_dataset, filtered_indices)
 
         if len(full_dataset) == 0:
@@ -995,7 +999,7 @@ class CrossDatasetTrainer:
         # Count actual classes
         all_labels = set()
         for i in range(len(full_dataset)):
-            all_labels.add(full_dataset[i]['me_label'].item())
+            all_labels.add(get_label(full_dataset, i))
         num_classes = len(all_labels)
         print(f"  Source {source}: {len(full_dataset)} samples, {num_classes} classes: {sorted(all_labels)}")
 
@@ -1100,7 +1104,7 @@ class CrossDatasetTrainer:
 
             # Filter shared classes
             t_filtered = [i for i in range(len(target_dataset))
-                         if target_dataset[i]['me_label'].item() >= 0]
+                         if get_label(target_dataset, i) >= 0]
             target_dataset = torch.utils.data.Subset(target_dataset, t_filtered)
 
             if len(target_dataset) == 0:

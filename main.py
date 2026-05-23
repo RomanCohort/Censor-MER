@@ -77,7 +77,8 @@ class Censor(nn.Module):
 
     def __init__(self, fast_preprocess=False, diff_mode=False, verbose=True,
                  enable_sparse_control=False, return_features=False,
-                 pretrained_backbone=False, single_path=None):
+                 pretrained_backbone=False, single_path=None,
+                 no_moe=False):
         super().__init__()
 
         self.fast_preprocess = fast_preprocess
@@ -153,10 +154,15 @@ class Censor(nn.Module):
         self.au_decoder = DynamicAUDecoder(AU_DECODER_CONFIG)
 
         # =====================================================================
-        # Stage 6: MoE Head & Personalized Radar
+        # Stage 6: MoE Head & Personalized Radar (or Simple Linear for ablation)
         # =====================================================================
-        print("[Censor] Initializing MoE Head...")
-        self.moe = MoEGatingNetwork(MOE_CONFIG)
+        self.no_moe = no_moe
+        if no_moe:
+            print("[Censor] ABLATION: No MoE — using simple linear head")
+            self.simple_head = nn.Linear(1024, MOE_CONFIG['num_classes'])
+        else:
+            print("[Censor] Initializing MoE Head...")
+            self.moe = MoEGatingNetwork(MOE_CONFIG)
         self.radar = PersonalizedRadar(RADAR_CONFIG)
 
         # =====================================================================
@@ -283,7 +289,12 @@ class Censor(nn.Module):
             # Skip to Stage 5
             apex_scores = torch.zeros(B, 1, device=x.device)
             au_intensities, au_opd = self.au_decoder(fused_feat)
-            me_logits, expert_gates, moe_aux_loss = self.moe(fused_feat)
+            if self.no_moe:
+                me_logits = self.simple_head(fused_feat)
+                expert_gates = torch.zeros(B, 1, device=x.device)
+                moe_aux_loss = torch.tensor(0.0, device=x.device)
+            else:
+                me_logits, expert_gates, moe_aux_loss = self.moe(fused_feat)
             adapted_feat = self.radar(fused_feat)
             template_reports, llm_reports = {}, {}
             return {
@@ -374,11 +385,16 @@ class Censor(nn.Module):
         au_intensities, au_opd = self.au_decoder(fused_feat)  # (B, 16, 28), (B, 28, 3)
 
         # =====================================================================
-        # Stage 6: MoE Head & Personalized Radar
+        # Stage 6: MoE Head or Simple Linear (ablation) & Personalized Radar
         # =====================================================================
-        if self.verbose: print(f"\n--- Stage 6: MoE Head ---")
+        if self.verbose: print(f"\n--- Stage 6: Classification Head ---")
 
-        me_logits, expert_gates, moe_aux_loss = self.moe(fused_feat)  # (B, 7), (B, 3), scalar
+        if self.no_moe:
+            me_logits = self.simple_head(fused_feat)
+            expert_gates = torch.zeros(B, 1, device=x.device)
+            moe_aux_loss = torch.tensor(0.0, device=x.device)
+        else:
+            me_logits, expert_gates, moe_aux_loss = self.moe(fused_feat)
 
         # Personalized Radar (test-time adaptation, skip in debug forward)
         adapted_feat = self.radar(fused_feat)  # (B, 1024) - identity pass in debug

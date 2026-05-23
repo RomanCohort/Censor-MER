@@ -1,13 +1,13 @@
 #!/bin/bash
-# Ablation Study: Single-path vs Dual-path
+# Ablation Study: Pathway & MoE
 # ==========================================
-# Tests whether the dual-pathway architecture actually helps
-# by comparing Fast-only, Slow-only, and Full dual-path models.
+# Tests:
+#   A1. Fast-only (3D ResNet18)
+#   A2. Slow-only (3D Swin Transformer)
+#   A3. Dual-path, No MoE (simple linear head)
+#   A4. Full model (dual-path + MoE)
 #
-# Usage:
-#   bash scripts/ablation_pathway.sh
-#
-# All three runs use the same CASME2 LOSO protocol for fair comparison.
+# All use CASME2 LOSO for fair comparison.
 
 set -e
 
@@ -17,149 +17,22 @@ SAMM_ROOT="/root/data/SAMM"
 SAVE_DIR="./checkpoints"
 LOG_DIR="./logs"
 
-# ============================
-# 1. Fast Path Only (3D ResNet18)
-# ============================
-echo "=========================================="
-echo " Ablation 1: Fast Path Only (3D ResNet18)"
-echo "=========================================="
+run_loso() {
+    local TAG=$1
+    local EXTRA=$2
 
-python train_cross.py \
-    --phase pretrain \
-    --casme_root $CASME_ROOT \
-    --smic_root $SMIC_ROOT \
-    --samm_root $SAMM_ROOT \
-    --pretrained_backbone \
-    --single_path fast \
-    --epochs 80 \
-    --batch_size 16 \
-    --lr 3e-4 \
-    --backbone_lr_factor 0.1 \
-    --weight_decay 0.0 \
-    --warmup_epochs 5 \
-    --patience 50 \
-    --grad_accum_steps 1 \
-    --use_arcface \
-    --arcface_margin 0.2 \
-    --arcface_scale 16 \
-    --label_smoothing 0.1 \
-    --save_every 999 \
-    --save_dir $SAVE_DIR/pretrain_fast \
-    --log_dir $LOG_DIR/pretrain_fast
+    echo "=========================================="
+    echo " Ablation: $TAG"
+    echo "=========================================="
 
-echo ""
-echo "Fast pretrain done. Running LOSO..."
-
-python train_cross.py \
-    --phase finetune \
-    --target_dataset casme2 \
-    --pretrained $SAVE_DIR/pretrain_fast/pretrain_best.pth \
-    --casme_root $CASME_ROOT \
-    --smic_root $SMIC_ROOT \
-    --samm_root $SAMM_ROOT \
-    --loso \
-    --pretrained_backbone \
-    --single_path fast \
-    --epochs 50 \
-    --batch_size 8 \
-    --lr 1e-4 \
-    --backbone_lr_factor 0.1 \
-    --weight_decay 0.0 \
-    --warmup_epochs 3 \
-    --patience 50 \
-    --grad_accum_steps 2 \
-    --use_arcface \
-    --arcface_margin 0.3 \
-    --arcface_scale 16 \
-    --label_smoothing 0.1 \
-    --save_every 999 \
-    --save_dir $SAVE_DIR/loso_fast \
-    --log_dir $LOG_DIR/loso_fast
-
-echo ""
-echo "Fast LOSO complete."
-echo ""
-
-# ============================
-# 2. Slow Path Only (3D Swin Transformer)
-# ============================
-echo "=========================================="
-echo " Ablation 2: Slow Path Only (3D Swin)"
-echo "=========================================="
-
-python train_cross.py \
-    --phase pretrain \
-    --casme_root $CASME_ROOT \
-    --smic_root $SMIC_ROOT \
-    --samm_root $SAMM_ROOT \
-    --pretrained_backbone \
-    --single_path slow \
-    --epochs 80 \
-    --batch_size 16 \
-    --lr 3e-4 \
-    --backbone_lr_factor 0.1 \
-    --weight_decay 0.0 \
-    --warmup_epochs 5 \
-    --patience 50 \
-    --grad_accum_steps 1 \
-    --use_arcface \
-    --arcface_margin 0.2 \
-    --arcface_scale 16 \
-    --label_smoothing 0.1 \
-    --save_every 999 \
-    --save_dir $SAVE_DIR/pretrain_slow \
-    --log_dir $LOG_DIR/pretrain_slow
-
-echo ""
-echo "Slow pretrain done. Running LOSO..."
-
-python train_cross.py \
-    --phase finetune \
-    --target_dataset casme2 \
-    --pretrained $SAVE_DIR/pretrain_slow/pretrain_best.pth \
-    --casme_root $CASME_ROOT \
-    --smic_root $SMIC_ROOT \
-    --samm_root $SAMM_ROOT \
-    --loso \
-    --pretrained_backbone \
-    --single_path slow \
-    --epochs 50 \
-    --batch_size 8 \
-    --lr 1e-4 \
-    --backbone_lr_factor 0.1 \
-    --weight_decay 0.0 \
-    --warmup_epochs 3 \
-    --patience 50 \
-    --grad_accum_steps 2 \
-    --use_arcface \
-    --arcface_margin 0.3 \
-    --arcface_scale 16 \
-    --label_smoothing 0.1 \
-    --save_every 999 \
-    --save_dir $SAVE_DIR/loso_slow \
-    --log_dir $LOG_DIR/loso_slow
-
-echo ""
-echo "Slow LOSO complete."
-echo ""
-
-# ============================
-# 3. Dual Path (Full Model) — uses existing checkpoint
-# ============================
-echo "=========================================="
-echo " Ablation 3: Dual Path (Full Model)"
-echo "=========================================="
-
-if [ -f "$SAVE_DIR/pretrain/pretrain_best.pth" ]; then
-    echo "Using existing pretrain checkpoint: $SAVE_DIR/pretrain/pretrain_best.pth"
-else
-    echo "No existing pretrain checkpoint, running pretrain first..."
+    # Pretrain
     python train_cross.py \
         --phase pretrain \
         --casme_root $CASME_ROOT \
         --smic_root $SMIC_ROOT \
         --samm_root $SAMM_ROOT \
         --pretrained_backbone \
+        $EXTRA \
         --epochs 80 \
         --batch_size 16 \
         --lr 3e-4 \
@@ -173,44 +46,109 @@ else
         --arcface_scale 16 \
         --label_smoothing 0.1 \
         --save_every 999 \
-        --save_dir $SAVE_DIR/pretrain \
-        --log_dir $LOG_DIR/pretrain
+        --save_dir $SAVE_DIR/pretrain_${TAG} \
+        --log_dir $LOG_DIR/pretrain_${TAG}
+
+    echo ""
+    echo "Pretrain done for $TAG. Running LOSO..."
+
+    # LOSO
+    python train_cross.py \
+        --phase finetune \
+        --target_dataset casme2 \
+        --pretrained $SAVE_DIR/pretrain_${TAG}/pretrain_best.pth \
+        --casme_root $CASME_ROOT \
+        --smic_root $SMIC_ROOT \
+        --samm_root $SAMM_ROOT \
+        --loso \
+        --pretrained_backbone \
+        $EXTRA \
+        --epochs 50 \
+        --batch_size 8 \
+        --lr 1e-4 \
+        --backbone_lr_factor 0.1 \
+        --weight_decay 0.0 \
+        --warmup_epochs 3 \
+        --patience 50 \
+        --grad_accum_steps 2 \
+        --use_arcface \
+        --arcface_margin 0.3 \
+        --arcface_scale 16 \
+        --label_smoothing 0.1 \
+        --save_every 999 \
+        --save_dir $SAVE_DIR/loso_${TAG} \
+        --log_dir $LOG_DIR/loso_${TAG}
+
+    echo ""
+    echo "LOSO complete for $TAG."
+    echo ""
+}
+
+# ============================
+# A1: Fast-only
+# ============================
+run_loso "fast_only" "--single_path fast"
+
+# ============================
+# A2: Slow-only
+# ============================
+run_loso "slow_only" "--single_path slow"
+
+# ============================
+# A3: Dual-path, No MoE
+# ============================
+run_loso "dual_nomoe" "--no_moe"
+
+# ============================
+# A4: Full model (dual + MoE)
+# ============================
+if [ -f "$SAVE_DIR/pretrain/pretrain_best.pth" ]; then
+    echo "=========================================="
+    echo " Ablation: Full model (using existing pretrain)"
+    echo "=========================================="
+
+    python train_cross.py \
+        --phase finetune \
+        --target_dataset casme2 \
+        --pretrained $SAVE_DIR/pretrain/pretrain_best.pth \
+        --casme_root $CASME_ROOT \
+        --smic_root $SMIC_ROOT \
+        --samm_root $SAMM_ROOT \
+        --loso \
+        --pretrained_backbone \
+        --epochs 50 \
+        --batch_size 8 \
+        --lr 1e-4 \
+        --backbone_lr_factor 0.1 \
+        --weight_decay 0.0 \
+        --warmup_epochs 3 \
+        --patience 50 \
+        --grad_accum_steps 2 \
+        --use_arcface \
+        --arcface_margin 0.3 \
+        --arcface_scale 16 \
+        --label_smoothing 0.1 \
+        --save_every 999 \
+        --save_dir $SAVE_DIR/loso_full \
+        --log_dir $LOG_DIR/loso_full
+
+    echo ""
+    echo "Full model LOSO complete."
+    echo ""
+else
+    echo "No existing pretrain checkpoint, running pretrain first..."
+    run_loso "full" ""
 fi
 
-echo ""
-echo "Running Dual-Path LOSO..."
-
-python train_cross.py \
-    --phase finetune \
-    --target_dataset casme2 \
-    --pretrained $SAVE_DIR/pretrain/pretrain_best.pth \
-    --casme_root $CASME_ROOT \
-    --smic_root $SMIC_ROOT \
-    --samm_root $SAMM_ROOT \
-    --loso \
-    --pretrained_backbone \
-    --epochs 50 \
-    --batch_size 8 \
-    --lr 1e-4 \
-    --backbone_lr_factor 0.1 \
-    --weight_decay 0.0 \
-    --warmup_epochs 3 \
-    --patience 50 \
-    --grad_accum_steps 2 \
-    --use_arcface \
-    --arcface_margin 0.3 \
-    --arcface_scale 16 \
-    --label_smoothing 0.1 \
-    --save_every 999 \
-    --save_dir $SAVE_DIR/loso_dual \
-    --log_dir $LOG_DIR/loso_dual
-
-echo ""
+# ============================
+# Summary
+# ============================
 echo "=========================================="
 echo " Ablation Study Complete!"
 echo "=========================================="
 echo ""
-echo "Results:"
-echo "  Fast-only LOSO:  $LOG_DIR/loso_fast/"
-echo "  Slow-only LOSO:  $LOG_DIR/loso_slow/"
-echo "  Dual-path LOSO:  $LOG_DIR/loso_dual/"
+echo "Results (CASME2 LOSO):"
+echo "  A1 Fast-only:     $LOG_DIR/loso_fast_only/"
+echo "  A2 Slow-only:      $LOG_DIR/loso_slow_only/"
+echo "  A3 Dual+NoMoE:    $LOG_DIR/loso_dual_nomoe/"
+echo "  A4 Full (Dual+MoE): $LOG_DIR/loso_full/"

@@ -248,6 +248,7 @@ class CrossDatasetTrainer:
             enable_sparse_control=False,
             pretrained_backbone=getattr(args, 'pretrained_backbone', False),
             single_path=args.single_path,
+            no_moe=args.no_moe,
         ).to(self.device)
 
         # Determine num_classes based on phase
@@ -1507,6 +1508,8 @@ def parse_args():
     parser.add_argument('--single_path', type=str, default=None,
                         choices=['fast', 'slow'],
                         help='Ablation: use single pathway only (fast or slow)')
+    parser.add_argument('--no_moe', action='store_true',
+                        help='Ablation: replace MoE head with simple linear layer')
 
     return parser.parse_args()
 

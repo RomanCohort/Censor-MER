@@ -920,6 +920,8 @@ class CrossDatasetTrainer:
         """Main training loop."""
         if self.phase == 'generalize':
             self._run_generalize()
+        elif self.phase == 'cross_eval':
+            self._run_cross_eval()
         elif self.args.loso and self.phase == 'finetune':
             self._train_loso()
         else:
@@ -928,6 +930,219 @@ class CrossDatasetTrainer:
     # ================================================================
     # Generalize: LOSO on each dataset separately
     # ================================================================
+    def _run_cross_eval(self):
+        """Cross-dataset evaluation: finetune on source, zero-shot test on targets.
+
+        Uses only shared classes (happiness, surprise, disgust) across datasets.
+        """
+        args = self.args
+        source = args.source_dataset
+        target_str = args.target_datasets or ''
+
+        if not source:
+            raise ValueError("--source_dataset required for cross_eval phase")
+
+        # Parse target datasets
+        target_list = [t.strip() for t in target_str.split(',') if t.strip()]
+        if not target_list:
+            raise ValueError("--target_datasets required for cross_eval phase")
+
+        # Shared 3-class mapping (happiness=0, surprise=1, disgust=2)
+        CROSS_EMOTION_MAP = {
+            'happiness': 0, 'surprise': 1, 'disgust': 2,
+            'positive': 0, 'negative': 2,  # SMIC
+            # SAMM integer codes: 1=happiness, 2=surprise, 3=disgust
+        }
+        SAMM_CROSS_MAP = {1: 0, 2: 1, 3: 2}  # happiness, surprise, disgust only
+
+        DATASET_MAP = {
+            'casme2': (CASME2FrameDataset, args.casme_root),
+            'smic': (SMICFrameDataset, args.smic_root),
+            'samm': (SAMMFrameDataset, args.samm_root),
+        }
+
+        # Step 1: Finetune on source dataset (3-class, random split)
+        print(f"\n{'='*60}")
+        print(f" Cross-Dataset Eval: Source={source}, Targets={target_list}")
+        print(f"{'='*60}")
+
+        DatasetClass, root = DATASET_MAP[source]
+        if source == 'samm':
+            emotion_map = SAMM_CROSS_MAP
+        else:
+            emotion_map = CROSS_EMOTION_MAP
+
+        full_dataset = DatasetClass(
+            root_dir=root,
+            T=args.T, H=args.H, W=args.W,
+            augment=True,
+            emotion_map=emotion_map,
+            exclude_negative=True,
+        )
+
+        # Filter to only shared classes
+        filtered_indices = [i for i in range(len(full_dataset))
+                           if full_dataset[i]['me_label'].item() >= 0]
+        full_dataset = torch.utils.data.Subset(full_dataset, filtered_indices)
+
+        if len(full_dataset) == 0:
+            raise ValueError(f"No samples in source dataset {source} with shared classes")
+
+        # Count actual classes
+        all_labels = set()
+        for i in range(len(full_dataset)):
+            all_labels.add(full_dataset[i]['me_label'].item())
+        num_classes = len(all_labels)
+        print(f"  Source {source}: {len(full_dataset)} samples, {num_classes} classes: {sorted(all_labels)}")
+
+        # Train/val split
+        train_size = int(0.8 * len(full_dataset))
+        val_size = len(full_dataset) - train_size
+        train_dataset, val_dataset = torch.utils.data.random_split(
+            full_dataset, [train_size, val_size],
+            generator=torch.Generator().manual_seed(42))
+
+        train_loader = DataLoader(train_dataset, batch_size=args.batch_size,
+                                  shuffle=True, num_workers=args.num_workers,
+                                  pin_memory=True, drop_last=True)
+        val_loader = DataLoader(val_dataset, batch_size=args.batch_size,
+                                shuffle=False, num_workers=args.num_workers,
+                                pin_memory=True)
+
+        # Adjust model for 3-class
+        self._adjust_moe_for_classes(num_classes)
+
+        # Build ArcFace for 3-class
+        self.arcface_loss = ArcFaceLoss(
+            in_features=1024, out_features=num_classes,
+            scale=args.arcface_scale, margin=args.arcface_margin
+        ).to(self.device)
+
+        # Build optimizer
+        optimizer = self._build_optimizer()
+        scheduler = self._build_scheduler(optimizer, len(train_loader))
+
+        # Load pretrained weights
+        if args.pretrained:
+            self._load_pretrained(args.pretrained)
+
+        # Train on source
+        print(f"\n  Training on {source} (3-class)...")
+        best_acc = 0.0
+        best_f1 = 0.0
+        for epoch in range(1, args.epochs + 1):
+            self.model.train()
+            total_loss = 0.0
+            correct = 0
+            total = 0
+
+            for batch in train_loader:
+                frames = batch['frames'].to(self.device)
+                me_labels = batch['me_label'].to(self.device).clamp(0, num_classes - 1)
+                au_labels = batch.get('au_label',
+                                     torch.zeros(frames.size(0), 28)).to(self.device)
+
+                outputs = self.model(frames)
+                loss = self._compute_loss(outputs, me_labels, au_labels)
+
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                optimizer.step()
+                if self.scheduler_step_per_batch:
+                    scheduler.step()
+
+                total_loss += loss.item()
+                preds = outputs['me_logits'].argmax(dim=1)
+                correct += (preds == me_labels).sum().item()
+                total += me_labels.size(0)
+
+            train_acc = correct / max(1, total)
+
+            # Validate on source val
+            val_loss, val_acc, val_f1 = self._validate_epoch(val_loader, num_classes)
+
+            if epoch % 10 == 0 or epoch == 1:
+                print(f"  Epoch {epoch}/{args.epochs} | "
+                      f"Train Acc: {train_acc:.4f} | "
+                      f"Val Acc: {val_acc:.4f} F1: {val_f1:.4f}")
+
+            if val_f1 > best_f1:
+                best_f1 = val_f1
+                best_acc = val_acc
+                # Save best source model
+                torch.save(self.model.state_dict(),
+                          os.path.join(args.save_dir, f'cross_src_{source}_best.pth'))
+
+        print(f"\n  Source {source} best: Acc={best_acc:.4f} F1={best_f1:.4f}")
+
+        # Step 2: Zero-shot test on each target dataset
+        results = {}
+        for target in target_list:
+            print(f"\n  --- Zero-shot on {target} ---")
+            DatasetClass, root = DATASET_MAP[target]
+            if target == 'samm':
+                t_emotion_map = SAMM_CROSS_MAP
+            else:
+                t_emotion_map = CROSS_EMOTION_MAP
+
+            target_dataset = DatasetClass(
+                root_dir=root,
+                T=args.T, H=args.H, W=args.W,
+                augment=False,
+                emotion_map=t_emotion_map,
+                exclude_negative=True,
+            )
+
+            # Filter shared classes
+            t_filtered = [i for i in range(len(target_dataset))
+                         if target_dataset[i]['me_label'].item() >= 0]
+            target_dataset = torch.utils.data.Subset(target_dataset, t_filtered)
+
+            if len(target_dataset) == 0:
+                print(f"  No shared-class samples in {target}, skipping")
+                continue
+
+            target_loader = DataLoader(target_dataset, batch_size=args.batch_size,
+                                       shuffle=False, num_workers=args.num_workers,
+                                       pin_memory=True)
+
+            # Evaluate
+            self.model.eval()
+            all_preds = []
+            all_labels = []
+            with torch.no_grad():
+                for batch in target_loader:
+                    frames = batch['frames'].to(self.device)
+                    me_labels = batch['me_label'].to(self.device).clamp(0, num_classes - 1)
+                    outputs = self.model(frames)
+                    preds = outputs['me_logits'].argmax(dim=1)
+                    all_preds.extend(preds.cpu().numpy())
+                    all_labels.extend(me_labels.cpu().numpy())
+
+            acc = accuracy_score(all_labels, all_preds)
+            f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+            results[target] = {'acc': acc, 'f1': f1, 'n': len(all_labels)}
+            print(f"  {target}: Acc={acc:.4f} F1={f1:.4f} (n={len(all_labels)})")
+
+        # Summary
+        print(f"\n{'='*60}")
+        print(f" Cross-Dataset Results (3-class shared)")
+        print(f"{'='*60}")
+        print(f"  Source: {source} (Acc={best_acc:.4f}, F1={best_f1:.4f})")
+        for target, r in results.items():
+            print(f"  → {target}: Acc={r['acc']:.4f}, F1={r['f1']:.4f} (n={r['n']})")
+
+        # Save results
+        os.makedirs(args.log_dir, exist_ok=True)
+        with open(os.path.join(args.log_dir, 'cross_eval_results.txt'), 'w') as f:
+            f.write(f"Source: {source}\n")
+            f.write(f"Source Acc: {best_acc:.4f}, F1: {best_f1:.4f}\n\n")
+            for target, r in results.items():
+                f.write(f"Target {target}: Acc={r['acc']:.4f}, F1={r['f1']:.4f}, n={r['n']}\n")
+
+        return results
+
     def _run_generalize(self):
         """Run LOSO evaluation on each available dataset to measure generalization.
 
@@ -1490,8 +1705,8 @@ def parse_args():
 
     # Phase
     parser.add_argument('--phase', type=str, default='pretrain',
-                        choices=['pretrain', 'finetune', 'generalize'],
-                        help='Training phase: pretrain (joint), finetune (single), generalize (LOSO on all datasets)')
+                        choices=['pretrain', 'finetune', 'generalize', 'cross_eval'],
+                        help='Training phase: pretrain (joint), finetune (single), generalize (LOSO on all datasets), cross_eval (train on source, zero-shot test on target)')
 
     # Dataset roots
     parser.add_argument('--casme_root', type=str, default=None,
@@ -1503,6 +1718,11 @@ def parse_args():
     parser.add_argument('--target_dataset', type=str, default='casme2',
                         choices=['casme2', 'smic', 'samm'],
                         help='Target dataset for finetune phase')
+    parser.add_argument('--source_dataset', type=str, default=None,
+                        choices=['casme2', 'smic', 'samm'],
+                        help='Source dataset for cross_eval phase (train on this)')
+    parser.add_argument('--target_datasets', type=str, default=None,
+                        help='Comma-separated target datasets for cross_eval (test on these)')
 
     # Model
     parser.add_argument('--pretrained', type=str, default=None,

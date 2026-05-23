@@ -1347,9 +1347,10 @@ class CrossDatasetTrainer:
             self.scheduler = self._build_scheduler(self.optimizer, len(train_loader))
             self.scheduler_step_per_batch = True
 
-            # Train fold — early stopping on val macro-F1
+            # Train fold — early stopping on train loss (val F1 too noisy on 3-8 samples)
             best_fold_acc = 0.0
             best_fold_f1 = 0.0
+            best_train_loss = float('inf')
             patience_counter = 0
 
             for epoch in range(1, args.epochs + 1):
@@ -1402,6 +1403,7 @@ class CrossDatasetTrainer:
                     correct += (preds == me_labels).sum().item()
                     total += me_labels.size(0)
 
+                train_loss = total_loss / max(1, len(train_loader))
                 train_acc = correct / max(1, total)
 
                 # Validate
@@ -1409,19 +1411,23 @@ class CrossDatasetTrainer:
 
                 if epoch % 5 == 0 or epoch == 1:
                     print(f"  Epoch {epoch}/{args.epochs} | "
-                          f"Train Acc: {train_acc:.4f} | "
+                          f"Train Loss: {train_loss:.4f} Acc: {train_acc:.4f} | "
                           f"Val Acc: {val_acc:.4f} F1: {val_f1:.4f}")
 
-                # Early stopping on macro-F1 (higher is better)
+                # Track best val metrics
                 if val_f1 > best_fold_f1:
                     best_fold_f1 = val_f1
                     best_fold_acc = val_acc
+
+                # Early stopping on train loss (stable, unlike noisy val F1 on tiny test set)
+                if train_loss < best_train_loss:
+                    best_train_loss = train_loss
                     patience_counter = 0
                 else:
                     patience_counter += 1
 
                 if patience_counter >= args.patience:
-                    print(f"  Early stop at epoch {epoch} (best_F1={best_fold_f1:.4f})")
+                    print(f"  Early stop at epoch {epoch} (train_loss={train_loss:.4f}, best_val_F1={best_fold_f1:.4f})")
                     break
 
             all_fold_accs.append(best_fold_acc)

@@ -491,12 +491,15 @@ class CrossDatasetTrainer:
             if target == 'casme2':
                 DatasetClass = CASME2FrameDataset
                 root = args.casme_root
+                emotion_map = UNIFIED_EMOTION_MAP
             elif target == 'smic':
                 DatasetClass = SMICFrameDataset
                 root = args.smic_root
+                emotion_map = UNIFIED_EMOTION_MAP
             elif target == 'samm':
                 DatasetClass = SAMMFrameDataset
                 root = args.samm_root
+                emotion_map = SAMM_EMOTION_MAP
             else:
                 raise ValueError(f"Unknown target dataset: {target}")
 
@@ -507,7 +510,25 @@ class CrossDatasetTrainer:
                 root_dir=root,
                 T=args.T, H=args.H, W=args.W,
                 augment=True,
+                emotion_map=emotion_map,
+                exclude_negative=True,
             )
+
+            # Determine actual num_classes from the dataset's label distribution
+            all_labels = set()
+            for i in range(len(full_dataset)):
+                lbl = full_dataset[i]['me_label']
+                if isinstance(lbl, torch.Tensor):
+                    lbl = lbl.item()
+                all_labels.add(int(lbl))
+            self.num_classes = len(all_labels)
+            self._adjust_moe_for_classes(self.num_classes)
+            if self.use_arcface:
+                self.arcface_loss = ArcFaceLoss(
+                    in_features=1024, out_features=self.num_classes,
+                    margin=args.arcface_margin, scale=args.arcface_scale,
+                ).to(self.device)
+                print(f"[Trainer] ArcFace re-initialized for {self.num_classes} classes (finetune on {target})")
 
             if args.loso:
                 # LOSO: Leave-One-Subject-Out — no fixed train/val split
@@ -749,6 +770,8 @@ class CrossDatasetTrainer:
             frames = batch['frames'].to(self.device)
             me_labels = batch['me_label'].to(self.device)
             au_labels = batch.get('au_label', torch.zeros(frames.size(0), 28)).to(self.device)
+            # Safety: clamp labels to valid range
+            me_labels = me_labels.clamp(0, self.num_classes - 1)
 
             outputs = self.model(frames)
             loss = self._compute_loss(outputs, me_labels, au_labels)
@@ -781,6 +804,8 @@ class CrossDatasetTrainer:
             frames = batch['frames'].to(self.device)
             me_labels = batch['me_label'].to(self.device)
             au_labels = batch.get('au_label', torch.zeros(frames.size(0), 28)).to(self.device)
+            # Safety: clamp labels to valid range
+            me_labels = me_labels.clamp(0, self.num_classes - 1)
 
             outputs = self.model(frames)
 
@@ -838,6 +863,8 @@ class CrossDatasetTrainer:
             frames = batch['frames'].to(self.device)
             me_labels = batch['me_label'].to(self.device)
             au_labels = batch.get('au_label', torch.zeros(frames.size(0), 28)).to(self.device)
+            # Safety: clamp labels to valid range
+            me_labels = me_labels.clamp(0, self.num_classes - 1)
 
             outputs = self.model(frames)
             loss = self._compute_loss(outputs, me_labels, au_labels)

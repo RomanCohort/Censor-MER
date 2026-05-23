@@ -1115,9 +1115,11 @@ class CrossDatasetTrainer:
             optimizer = self._build_optimizer()
             scheduler = self._build_scheduler(optimizer, len(train_loader))
 
-            # Train this fold — early stopping on val macro-F1
+            # Train this fold — early stopping on train loss (lower is better)
+            # LOSO test set is too small (3-8 samples) for reliable F1-based early stopping
             best_fold_acc = 0.0
             best_fold_f1 = 0.0
+            best_train_loss = float('inf')
             patience_counter = 0
 
             for epoch in range(args.epochs):
@@ -1137,15 +1139,19 @@ class CrossDatasetTrainer:
                       f"Val F1: {val_f1:.4f} | "
                       f"LR: {current_lr:.6f}")
 
-                # Early stopping on val macro-F1 (higher is better)
+                # Track best val metrics regardless of early stopping
                 if val_f1 > best_fold_f1:
                     best_fold_f1 = val_f1
                     best_fold_acc = val_acc
+
+                # Early stopping on train loss (stable signal, not noisy val F1)
+                if train_loss < best_train_loss:
+                    best_train_loss = train_loss
                     patience_counter = 0
                 else:
                     patience_counter += 1
                     if patience_counter >= args.patience:
-                        print(f"    Early stop at epoch {epoch+1} (best_F1={best_fold_f1:.4f})")
+                        print(f"    Early stop at epoch {epoch+1} (train_loss={train_loss:.4f}, best_val_F1={best_fold_f1:.4f})")
                         break
 
             fold_accs.append(best_fold_acc)

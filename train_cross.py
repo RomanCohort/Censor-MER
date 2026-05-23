@@ -1130,7 +1130,7 @@ class CrossDatasetTrainer:
                     all_preds.extend(preds.cpu().numpy())
                     all_labels.extend(me_labels.cpu().numpy())
 
-            acc = accuracy_score(all_labels, all_preds)
+            acc = (np.array(all_preds) == np.array(all_labels)).mean()
             f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
             results[target] = {'acc': acc, 'f1': f1, 'n': len(all_labels)}
             print(f"  {target}: Acc={acc:.4f} F1={f1:.4f} (n={len(all_labels)})")

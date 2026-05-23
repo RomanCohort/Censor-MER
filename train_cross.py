@@ -1029,6 +1029,7 @@ class CrossDatasetTrainer:
         # Build optimizer
         optimizer = self._build_optimizer()
         scheduler = self._build_scheduler(optimizer, len(train_loader))
+        self.scheduler_step_per_batch = True
 
         # Load pretrained weights
         if args.pretrained:

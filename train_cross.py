@@ -250,6 +250,9 @@ class CrossDatasetTrainer:
             single_path=args.single_path,
             no_moe=args.no_moe,
             no_amyg=getattr(args, 'no_amyg', False),
+            no_ffa=getattr(args, 'no_ffa', False),
+            no_casa=getattr(args, 'no_casa', False),
+            no_rppg=getattr(args, 'no_rppg', False),
         ).to(self.device)
 
         # Determine num_classes based on phase
@@ -1795,6 +1798,12 @@ def parse_args():
                         help='Ablation: replace MoE head with simple linear layer')
     parser.add_argument('--no_amyg', action='store_true',
                         help='Ablation: disable amygdala attention gating')
+    parser.add_argument('--no_ffa', action='store_true',
+                        help='Ablation: disable FFA fusion module')
+    parser.add_argument('--no_casa', action='store_true',
+                        help='Ablation: disable CASANet spatiotemporal attention')
+    parser.add_argument('--no_rppg', action='store_true',
+                        help='Ablation: disable rPPG signal extraction')
 
     return parser.parse_args()
 

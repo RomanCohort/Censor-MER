@@ -78,7 +78,8 @@ class Censor(nn.Module):
     def __init__(self, fast_preprocess=False, diff_mode=False, verbose=True,
                  enable_sparse_control=False, return_features=False,
                  pretrained_backbone=False, single_path=None,
-                 no_moe=False, no_amyg=False):
+                 no_moe=False, no_amyg=False, no_ffa=False,
+                 no_casa=False, no_rppg=False):
         super().__init__()
 
         self.fast_preprocess = fast_preprocess
@@ -98,12 +99,30 @@ class Censor(nn.Module):
         if no_amyg:
             print("[Censor] ABLATION: No amygdala attention gating")
 
+        # No FFA for ablation study
+        self.no_ffa = no_ffa
+        if no_ffa:
+            print("[Censor] ABLATION: No FFA fusion")
+
+        # No CASANet for ablation study
+        self.no_casa = no_casa
+        if no_casa:
+            print("[Censor] ABLATION: No CASANet")
+
+        # No rPPG for ablation study
+        self.no_rppg = no_rppg
+        if no_rppg:
+            print("[Censor] ABLATION: No rPPG signal")
+
         # =====================================================================
         # Stage 1: Biomimetic Preprocessing
         # =====================================================================
         print("[Censor] Initializing Preprocessing...")
         self.saliency = SaliencyDetector()
-        self.rppg = rPPGExtractor()
+        if not self.no_rppg:
+            self.rppg = rPPGExtractor()
+        else:
+            self.rppg = None
         if not fast_preprocess:
             self.flow = TVL1OpticalFlow()
         else:
@@ -125,8 +144,14 @@ class Censor(nn.Module):
             self.amygdala = Amygdala(AMYGDALA_CONFIG)
         else:
             self.amygdala = None
-        self.ffa = FFA(FFA_CONFIG)
-        self.casa = CASANet(CASA_CONFIG)
+        if not self.no_ffa:
+            self.ffa = FFA(FFA_CONFIG)
+        else:
+            self.ffa = None
+        if not self.no_casa:
+            self.casa = CASANet(CASA_CONFIG)
+        else:
+            self.casa = None
 
         # =====================================================================
         # Stage 4: Spatio-Temporal Fusion
@@ -238,6 +263,10 @@ class Censor(nn.Module):
             # Use diff as the "change signal" instead of rPPG
             rppg_heatmap = onset_apex_diff
             if self.verbose: print(f"[Censor] Diff mode: onset-apex diff shape: {rppg_heatmap.shape}")
+        elif self.no_rppg:
+            # No rPPG: use zeros (rPPG signal disabled)
+            rppg_heatmap = torch.zeros_like(x_salient)
+            if self.verbose: print(f"[Censor] No rPPG: using zeros")
         else:
             # Original: rPPG blood-flow heatmap
             rppg_heatmap = self.rppg(x_salient)
@@ -347,11 +376,15 @@ class Censor(nn.Module):
 
         # FFA: mutual channel recalibration between pathways
         # Inputs: (B, 512), (B, 768) -> Outputs: (B, 512), (B, 768)
-        fast_gated, slow_gated = self.ffa(fast_feat, slow_feat)
+        if self.ffa is not None:
+            fast_gated, slow_gated = self.ffa(fast_feat, slow_feat)
+        else:
+            # No FFA: use original features directly
+            fast_gated, slow_gated = fast_feat, slow_feat
 
         # CASANet: 3D contextual attention on Slow pathway spatial map
         # Input: (B, 768, T_s, H_s, W_s) -> Output: (B, 768, T_s, H_s, W_s) + (B, T_s) apex scores
-        if slow_spatial is not None:
+        if slow_spatial is not None and self.casa is not None:
             casa_feat, apex_scores = self.casa(slow_spatial)
             # Pool spatial map from CASANet for fusion
             casa_pooled = casa_feat.mean(dim=[-1, -2, -3])  # (B, 768)
@@ -359,7 +392,7 @@ class Censor(nn.Module):
             casa_gate = torch.sigmoid(casa_pooled.mean(dim=1, keepdim=True))  # (B, 1)
             slow_for_fusion = casa_gate * casa_pooled + (1 - casa_gate) * slow_gated
         else:
-            # Fallback if spatial map is None
+            # Fallback if spatial map is None or CASANet disabled
             casa_feat = None
             apex_scores = torch.zeros(B, 1, device=x.device)
             slow_for_fusion = slow_gated

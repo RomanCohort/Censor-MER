@@ -1,0 +1,64 @@
+% main_cn.tex - 中文论文（计算机学报格式）
+% Censor: 一种仿生双通路微表情识别框架
+
+\documentclass[12pt,a4paper]{article}
+
+% 中文支持
+\usepackage{ctex}
+\usepackage{CJKutf8}
+
+% 常用包
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{hyperref}
+
+% 页面设置
+\usepackage[top=2.5cm,bottom=2.5cm,left=2.5cm,right=2.5cm]{geometry}
+
+% 参考文献样式
+\usepackage[numbers,sort&compress]{natbib}
+\bibliographystyle{gbt7714-numerical}
+
+\begin{document}
+
+\title{Censor：一种仿生双通路微表情识别框架}
+\author{
+作者甲$^{1)$\dagger}$ \quad 作者乙$^{1)}$ \quad 作者丙$^{1)}$ \\
+$^{1)}$某某大学计算机科学与技术学院，某某省某某市 000000 \\
+$\dagger$通信作者, E-mail: author@example.com
+}
+
+\maketitle
+
+% 中文摘要
+\begin{abstract}
+微表情识别（MER）由于面部运动的细微空间幅度和短暂时持续而面临巨大挑战。本文提出\textbf{Censor}，一种受神经科学梭状回-杏仁核回路启发的仿生双通路神经网络架构。框架包含：快通路（3D ResNet-18处理光流，类比皮层下路径）和慢通路（3D Swin Transformer处理RGB+rPPG，类比皮层路径），通过杏仁核启发的注意力门控和混合专家分类进行融合。在CASME II四类LOSO评估中，Censor达到0.85准确率和0.80 F1分数。跨数据集实验表明从CASME II迁移到SMIC和SAMM可获得0.74--0.76准确率，验证了强泛化能力。消融实验证实了各架构组件的贡献。
+
+\keywords{微表情识别；双通路神经网络；仿生计算；3D Swin Transformer；混合专家；留一受试者交叉验证}
+\end{abstract}
+
+% 英文摘要
+\begin{enabstract}
+Micro-expression recognition (MER) remains challenging due to subtle spatial magnitude and brief temporal duration of involuntary facial movements. This paper presents \textbf{Censor}, a biomimetic dual-pathway neural architecture inspired by the fusiform-amygdala circuit. The framework comprises a fast pathway (3D ResNet-18 on optical flow, analogous to subcortical route) and a slow pathway (3D Swin Transformer on RGB+rPPG, analogous to cortical route), integrated through amygdala-inspired gating and mixture-of-experts classification. On CASME II 4-class LOSO, Censor achieves 0.85 accuracy and 0.80 F1-score. Cross-dataset experiments show 0.74--0.76 accuracy when transferring to SMIC and SAMM. Ablation studies validate each component's contribution.
+
+\enkeywords{Micro-expression recognition; Dual-pathway neural network; Biomimetic computing; 3D Swin Transformer; Mixture of experts; Leave-one-subject-out}
+\end{enabstract}
+
+% 正文
+\newpage
+\input{sections/introduction_cn.tex}
+\input{sections/related_work_cn.tex}
+\input{sections/method_cn.tex}
+\input{sections/experiments_cn.tex}
+\input{sections/results_cn.tex}
+\input{sections/discussion_cn.tex}
+\input{sections/conclusion_cn.tex}
+
+% 参考文献
+\bibliography{references_cn}
+
+\end{document}

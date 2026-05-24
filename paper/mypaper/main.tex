@@ -1,0 +1,60 @@
+% Neural Networks Journal Template - Elsevier elsarticle
+% main.tex - Censor MER Paper
+
+\documentclass[preprint,12pt]{elsarticle}
+
+% Packages
+\usepackage{lineno}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{hyperref}
+
+% Math commands
+\input{math_commands.tex}
+
+% Bibliography
+\bibliographystyle{elsarticle-num}
+
+\begin{document}
+
+\begin{frontmatter}
+
+\title{Censor: A Biomimetic Dual-Pathway Framework for Micro-Expression Recognition}
+
+\author[inst1]{Author A\corref{cor1}}
+\ead{author@example.com}
+\author[inst1]{Author B}
+\ead{author2@example.com}
+
+\cortext[cor1]{Corresponding author}
+\affiliation[inst1]{organization={Department of Computer Science, University Name}, city={City}, country={Country}}
+
+\begin{abstract}
+Micro-expression recognition (MER) remains a formidable challenge in affective computing due to the subtle spatial magnitude and brief temporal duration of involuntary facial movements. This paper presents \textbf{Censor}, a biomimetic dual-pathway neural architecture for MER that draws direct inspiration from the neurological fusiform-amygdala circuit governing subconscious facial affect processing. The proposed framework comprises a fast subcortical pathway (3D ResNet-18 on optical flow) and a slow cortical pathway (3D Swin Transformer on RGB+rPPG), integrated through amygdala-inspired attention gating and mixture-of-experts classification. On CASME II 4-class LOSO evaluation, Censor achieves 0.85 accuracy and 0.80 F1-score, demonstrating competitive performance with state-of-the-art methods. Cross-dataset experiments confirm strong generalization with 0.74-0.76 accuracy when transferring from CASME II to SMIC and SAMM. Ablation studies validate the contribution of each architectural component.
+\end{abstract}
+
+\begin{keyword}
+Micro-expression recognition \sep Dual-pathway neural network \sep Biomimetic computing \sep 3D Swin Transformer \sep Mixture of experts \sep Leave-one-subject-out
+\end{keyword}
+
+\end{frontmatter}
+
+\linenumbers
+
+% Sections
+\input{sections/introduction.tex}
+\input{sections/related_work.tex}
+\input{sections/method.tex}
+\input{sections/experiments.tex}
+\input{sections/results.tex}
+\input{sections/discussion.tex}
+\input{sections/conclusion.tex}
+
+% Bibliography
+\bibliography{references}
+
+\end{document}

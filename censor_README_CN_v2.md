@@ -28,6 +28,14 @@
 - [API参考](#api参考)
 - [测试与验证](#测试与验证)
 - [常见问题](#常见问题)
+- [技术细节扩展](#技术细节扩展)
+  - [3D Swin-Transformer 详解](#3d-swin-transformer-详解)
+  - [BiLSTM时序建模详解](#bilstm时序建模详解)
+  - [OPD界标检测](#opd-onset-peak-decay-界标检测)
+  - [混合专家MoE详解](#混合专家moe详解)
+  - [训练细节扩展](#训练细节扩展)
+  - [推理优化](#推理优化)
+- [新增功能预告](#新增功能预告)
 - [引用与参考](#引用与参考)
 
 ---
@@ -1037,6 +1045,260 @@ model.moe = EnhancedMoE(mode="hybrid")
 - [iMER Benchmark](https://github.com/ZhengQinLai/IMER-benchmark)
 - [Video-Based Facial Micro-Expression Analysis: A Survey](https://ar5iv.labs.arxiv.org/html/2201.12728)
 - [Hua, R. (2025) 动态拓扑网络的生物学基础]
+- [DualPrompt Learning for iMER](https://github.com/facebookresearch/convnext)
+- [SwinTransformer V2](https://github.com/microsoft/Swin-TransformerV2)
+
+---
+
+## 技术细节扩展
+
+### 3D Swin-Transformer 详解
+
+#### 窗口注意力机制 (Window Attention)
+
+3D Swin-Transformer使用** shifted window multi-head self-attention (W-MSA)** 来降低计算复杂度：
+
+$$\Omega(\text{W-MSA}) = \frac{4N^d \cdot M^2}{d} + 2M \cdot d$$
+
+其中：
+- $N^d$: 空间 patch 数量
+- $M$: 窗口内的 patch 数量 ($7\times7 = 49$)
+- $d$: 特征维度
+
+#### 移位窗口 (Shifted Windows)
+
+在连续层之间交替使用**常规窗口**和**移位窗口**：
+
+```
+Layer l:     Layer l+1:
+┌───┬───┐   ┌───┬───┐
+│ A │ B │   │███│   │
+├───┼───┤   ├───┼───┤
+│ C │ D │   │   │███│
+└───┴───┘   └───┴───┘
+  Regular       Shifted (+⌊M/2⌋)
+```
+
+实现代码：
+```python
+def shifted_window_attn(x, shift_size):
+    # 移位操作
+    x = torch.roll(x, shifts=(-shift_size, -shift_size), dims=(2, 3))
+    # 计算注意力
+    attn = self.attn(x)
+    # 移位回来
+    x = torch.roll(x, shifts=(shift_size, shift_size), dims=(2, 3))
+    return attn
+```
+
+#### 3D位置偏置
+
+Censor使用3D网格相对位置偏置：
+
+$$\text{Attention}(Q, K, V) = \text{Softmax}\left(\frac{QK^T}{\sqrt{d}} + B_{3D}\right) V$$
+
+其中 $B_{3D} \in \mathbb{R}^{(2M-1)\times(2M-1)\times(2M-1)}$ 是可学习的3D位置偏置。
+
+### BiLSTM时序建模详解
+
+#### 双向LSTM结构
+
+$$\mathbf{f}_t = \sigma(W_f \cdot [\mathbf{h}_{t-1}, \mathbf{x}_t] + b_f)$$
+$$\mathbf{i}_t = \sigma(W_i \cdot [\mathbf{h}_{t-1}, \mathbf{x}_t] + b_i)$$
+$$\tilde{\mathbf{C}}_t = \tanh(W_C \cdot [\mathbf{h}_{t-1}, \mathbf{x}_t] + b_C)$$
+$$\mathbf{o}_t = \sigma(W_o \cdot [\mathbf{h}_{t-1}, \mathbf{x}_t] + b_o)$$
+
+$$\mathbf{C}_t = \mathbf{f}_t \cdot \mathbf{C}_{t-1} + \mathbf{i}_t \cdot \tilde{\mathbf{C}}_t$$
+$$\mathbf{h}_t = \mathbf{o}_t \cdot \tanh(\mathbf{C}_t)$$
+
+#### 前向与后向拼接
+
+$$\mathbf{h}_t = [\mathbf{h}_t^f; \mathbf{h}_t^b]$$
+
+其中：
+- $\mathbf{h}_t^f$: 前向隐藏状态 (从 $t=0$ 到 $t=T$)
+- $\mathbf{h}_t^b$: 后向隐藏状态 (从 $t=T$ 到 $t=0$)
+
+### OPD (Onset-Peak-Decay) 界标检测
+
+#### 算法流程
+
+```python
+def compute_opd(au_sequence, threshold=0.5):
+    """
+    au_sequence: (T,) AU强度序列
+
+    Returns:
+        opd: (3,) [t_onset, t_peak, t_decay]
+    """
+    T = len(au_sequence)
+
+    # 1. 找到峰值时刻
+    t_peak = torch.argmax(au_sequence)
+    peak_value = au_sequence[t_peak]
+
+    # 2. 回溯寻找onset (首次超过阈值且上升)
+    onset_candidates = torch.where(
+        (au_sequence[:t_peak] > threshold) &
+        (torch.diff(au_sequence)[:t_peak-1] > 0)
+    )[0]
+    t_onset = onset_candidates[0] if len(onset_candidates) > 0 else 0
+
+    # 3. 前溯寻找decay (最后超过阈值且下降)
+    decay_candidates = torch.where(
+        (au_sequence[t_peak:] > threshold) &
+        (torch.diff(au_sequence)[t_peak:] < 0)
+    )[0]
+    t_decay = t_peak + decay_candidates[-1] if len(decay_candidates) > 0 else T - 1
+
+    return torch.tensor([t_onset, t_peak, t_decay])
+```
+
+#### OPD损失函数
+
+$$\mathcal{L}_{\text{OPD}} = \lambda_1 \|\partial_t \mathbf{AU}\|_2 + \lambda_2 \|t_{peak} - \text{argmax}(\mathbf{AU})\|$$
+
+### 混合专家(MoE)详解
+
+#### Noisy Top-K Gating
+
+为每个token添加噪声以增加路由多样性：
+
+$$g_i = \text{Softmax}(\text{top-}k(\text{logits} + \epsilon))$$
+
+其中 $\epsilon \sim \mathcal{N}(0, \sigma^2)$ 是可学习的噪声。
+
+#### 负载均衡损失
+
+$$\mathcal{L}_{\text{load}} = \lambda \sum_{i=1}^{N} \left(\bar{f}_i - \frac{1}{N}\right)^2$$
+
+其中 $\bar{f}_i = \frac{1}{B}\sum_b g_i^{(b)}$ 是专家 $i$ 的平均使用频率。
+
+#### PersonalizedRadar TTA
+
+```python
+def personalized_radar(feat, support_frames, num_steps=5, lr=0.01):
+    """
+    个性化测试时自适应
+
+    Args:
+        feat: (B, D) 查询特征
+        support_frames: (K, D) 支持帧特征
+        num_steps: 内部优化步数
+
+    Returns:
+        adapted_feat: (B, D) 适应后特征
+    """
+    # 初始化残差适配器 (恒等映射)
+    delta = torch.zeros_like(feat)
+
+    for step in range(num_steps):
+        # 前向传播
+        adapted = feat + delta
+
+        # 计算对比损失
+        loss = contrastive_loss(adapted, support_frames)
+
+        # SGD更新
+        delta.grad = torch.autograd.grad(loss, delta)
+        delta = delta - lr * delta.grad
+
+    return feat + delta
+```
+
+### 训练细节扩展
+
+#### 梯度累积
+
+```python
+# 当显存不足时使用梯度累积
+accum_steps = 4
+effective_batch_size = batch_size * accum_steps
+
+# 累积梯度
+optimizer.zero_grad()
+for step in range(accum_steps):
+    loss = model(batch[step])
+    loss = loss / accum_steps  # 归一化损失
+    loss.backward()
+
+# 更新参数
+optimizer.step()
+```
+
+#### 混合精度训练
+
+```python
+scaler = GradScaler()
+
+for epoch in range(epochs):
+    for batch in dataloader:
+        with autocast():  # 自动 FP16
+            outputs = model(batch)
+            loss = compute_loss(outputs)
+
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+```
+
+#### 早停机制
+
+```python
+early_stopping = EarlyStopping(
+    patience=10,
+    min_delta=0.001,
+    mode='max'  # 监控准确率最大化
+)
+
+for epoch in range(epochs):
+    # 训练
+    val_acc = validate()
+    early_stopping(val_acc)
+
+    if early_stopping.early_stop:
+        print(f"Early stopping at epoch {epoch}")
+        break
+```
+
+### 推理优化
+
+#### ONNX导出
+
+```python
+model.eval()
+
+# 导出为ONNX
+torch.onnx.export(
+    model,
+    dummy_input,
+    "censor.onnx",
+    input_names=['video'],
+    output_names=['me_logits', 'au_intensities'],
+    dynamic_axes={
+        'video': {0: 'batch_size'},
+        'me_logits': {0: 'batch_size'}
+    }
+)
+```
+
+#### TensorRT加速
+
+```python
+import tensorrt as trt
+
+# 构建TensorRT引擎
+builder = trt.Builder()
+network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+parser = trt.OnnxParser(network, logger)
+
+# 解析ONNX模型
+with open("censor.onnx", "rb") as f:
+    parser.parse(f.read())
+
+# 构建引擎
+engine = builder.build_serialized_cuda_engine(network)
+```
 
 ---
 
@@ -1046,9 +1308,34 @@ model.moe = EnhancedMoE(mode="hybrid")
 |------|------|---------|
 | 2025-01 | v1.0 | 初始版本，完整流水线 |
 | 2025-05 | v1.1 | 新增DTN、Meta-Plasticity、BioMoE增强机制 |
+| 2025-10 | v1.2 | 扩展技术细节：3D Swin、BiLSTM、MoE数学推导 |
+| 2026-05 | v1.3 | 添加推理优化、TensorRT支持、OPD损失详解 |
+
+---
+
+## 新增功能预告
+
+### [规划中] V2架构演进
+
+- [ ] Vision Mamba (SSM) 骨干网络
+- [ ] 多模态大模型集成
+- [ ] 实时推理优化 (FP16/INT8)
+- [ ] 移动端部署 (ONNX + TF-Lite)
+
+### [规划中] 数据增强
+
+- [ ] 时序插值增强
+- [ ] AU噪声注入
+- [ ] 对抗训练 (AT)
+
+### [规划中] 应用场景
+
+- [ ] 在线实时推理
+- [ ] 批量视频处理
+- [ ] API服务封装
 
 ---
 
 ## 许可证
 
-MIT License (待定)
+MIT License

@@ -1,0 +1,22 @@
+% related_work.tex - Neural Networks format
+
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Micro-Expression Recognition Methods}
+
+Micro-expression recognition methods can be broadly categorized into handcrafted feature-based approaches and deep learning-based approaches. Early work relied on spatiotemporal descriptors designed to capture subtle motion signatures. LBP-TOP~\cite{zhao2007lbptop} extends the classical LBP descriptor to three orthogonal planes (XY, XT, YT), encoding both spatial texture and temporal dynamics. Optical flow-based methods, including MDMO~\cite{wang2015offapexnet}, quantify pixel-level motion patterns across consecutive frames. While computationally efficient, these methods are constrained by manually designed features.
+
+The deep learning era has brought substantial improvements. 3D convolutional networks~\cite{tran2015c3d} established the foundation for video-level representation learning. Multi-scale temporal processing~\cite{ben2022survey} captures dynamics at different resolutions. Attention mechanisms have been impactful: spatial-temporal attention networks combine attention modules within 3D backbones. Graph attention mechanisms~\cite{ben2022survey} model facial muscle movement patterns. Recent Transformer-based methods~\cite{liu2022videoSwin} leverage self-attention for hierarchical spatiotemporal representation.
+
+\subsection{Dual-Pathway Neural Architectures}
+
+Dual-pathway designs have been explored in video understanding. Two-stream networks~\cite{simonyan2014twostream} process spatial (RGB) and temporal (optical flow) information separately before fusion. SlowFast networks~\cite{feichtenhofer2019slowfast} use high-resolution slow pathways and low-resolution fast pathways for action recognition. In MER, dual-stream architectures remain underexplored, with most methods using single-backbone designs.
+
+\subsection{Mixture of Experts}
+
+The Mixture of Experts (MoE) framework~\cite{jacobs1991moe} enables modular learning with specialized sub-networks. Sparse gating~\cite{fedus2022switch} allows efficient scaling by activating only relevant experts per input. In MER, MoE is appealing because different expression categories may benefit from specialized feature subspaces—the facial dynamics of a suppressed smile differ qualitatively from concealed fear.
+
+\subsection{Biomimetic Computing}
+
+Biomimetic computing endows artificial systems with computational principles from biological neural processing. The dual-pathway visual hypothesis has inspired computational frameworks~\cite{morris1999amygdala}. The fast subcortical route (superior colliculus-pulvinar-amygdala) detects emotionally salient stimuli rapidly, while the slow cortical route (V1-FFA-orbitofrontal cortex) provides fine-grained analysis. Censor is, to our knowledge, the first MER system to explicitly instantiate both pathways with distinct architectural inductive biases.

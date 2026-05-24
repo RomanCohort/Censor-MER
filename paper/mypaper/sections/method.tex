@@ -1,0 +1,94 @@
+% method.tex - Neural Networks format
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Architectural Overview}
+
+Censor is a biomimetic dual-pathway neural architecture implemented in PyTorch. The system processes 16-frame video clips at 224$\times$224 resolution through two complementary pathways before fusion and classification.
+
+\textbf{Fast Pathway}: A 3D ResNet-18 variant operating on optical flow, analogous to the subcortical visual route. This pathway captures rapid motion patterns with aggressive temporal downsampling, producing a 512-dimensional feature vector.
+
+\textbf{Slow Pathway}: A 3D Swin Transformer processing RGB frames supplemented with remote photoplethysmography (rPPG) signals, analogous to the cortical visual route. This pathway maintains high spatial resolution throughout, yielding a 768-dimensional representation.
+
+\textbf{Fusion}: Features from both pathways are combined through squeeze-excitation attention, followed by amygdala-inspired gating that modulates the fused representation.
+
+\textbf{Classification}: A noisy top-2 Mixture-of-Experts (MoE) mechanism routes inputs to specialized expert networks, enabling category-specific feature discrimination.
+
+\subsection{Biomimetic Preprocessing}
+
+\subsubsection{Optical Flow Extraction}
+
+The fast pathway input is computed via Dual TV-L1 optical flow~\cite{wang2015offapexnet}, optimizing:
+\begin{equation}
+E(\vect{u}) = \int_\Omega \left( |\nabla u_1| + |\nabla u_2| \right) d\vect{x} + \lambda \int_\Omega \rho(\vect{x}, \vect{u}) d\vect{x}
+\end{equation}
+where $\vect{u} = (u_1, u_2)$ is the displacement field and $\rho$ is the brightness constancy term. TV regularization preserves motion discontinuities at facial muscle boundaries.
+
+\subsubsection{rPPG Extraction}
+
+Remote photoplethysmography extracts cardiac signals from subtle color variations:
+\begin{equation}
+\vect{C}(t) = 0.77 \cdot R(t) - 0.51 \cdot G(t) - 0.26 \cdot B(t)
+\end{equation}
+The chrominance signal is bandpass filtered (0.5--4.0 Hz) to isolate heart rate range, providing physiological arousal cues.
+
+\subsection{Fast Pathway: 3D ResNet-18}
+
+The fast pathway comprises three stages with increasing channel dimensions and temporal downsampling:
+\begin{itemize}
+\item Stage 1: Input $\dim{2\times 16 \times 112 \times 112}$, output $\dim{64 \times 8 \times 56 \times 56}$
+\item Stage 2: Two residual blocks, output $\dim{128 \times 4 \times 28 \times 28}$
+\item Stage 3: Two residual blocks, output $\dim{256 \times 2 \times 14 \times 14}$
+\item Global pooling yields $\vect{f}_{\text{fast}} \in \dim{512}$
+\end{itemize}
+
+Residual blocks follow:
+\begin{equation}
+\vect{z}^{(i+1)} = \relu\left( \vect{z}^{(i)} + \mathcal{F}(\vect{z}^{(i)}; \vect{W}^{(i)}) \right)
+\end{equation}
+where $\mathcal{F}$ comprises 3D convolutions with batch normalization. Dropout (rate 0.1) provides regularization.
+
+\subsection{Slow Pathway: 3D Swin Transformer}
+
+The slow pathway processes concatenated RGB and rPPG signals ($\dim{6 \times 16 \times 224 \times 224}$) through four hierarchical stages:
+\begin{itemize}
+\item Stage 1: 96-dim embeddings, $(8 \times 14 \times 14)$ window resolution
+\item Stage 2: 192-dim, $(8 \times 7 \times 7)$ windows after patch merging
+\item Stage 3: 384-dim, $(4 \times 7 \times 7)$ windows
+\item Stage 4: 768-dim, $(2 \times 7 \times 7)$ windows, output $\vect{f}_{\text{slow}} \in \dim{768}$
+\end{itemize}
+
+Shifted-window multi-head self-attention (SW-MSA) enables cross-window connections:
+\begin{equation}
+\text{Attention}(\vect{Q}, \vect{K}, \vect{V}) = \softmax\left( \frac{\vect{Q}\vect{K}^\top}{\sqrt{d_k}} + \vect{B} \right) \vect{V}
+\end{equation}
+where $\vect{B}$ encodes relative position bias.
+
+\subsection{Fusion and Classification}
+
+\subsubsection{Feature Fusion}
+
+Concatenated features $\vect{f}_{\text{concat}} = [\vect{f}_{\text{fast}}; \vect{f}_{\text{slow}}] \in \dim{1280}$ are projected to $\dim{1024}$ through squeeze-excitation attention:
+\begin{equation}
+\vect{f}_{\text{fused}} = \sigma(\vect{W}_2 \cdot \relu(\vect{W}_1 \cdot \text{GAP}(\vect{f}_{\text{concat}}))) \cdot \vect{f}_{\text{concat}}
+\end{equation}
+
+\subsubsection{Mixture of Experts}
+
+Noisy top-2 gating selects expert networks:
+\begin{equation}
+G(\vect{x}) = \softmax\left( \vect{W}_g \vect{x} + \epsilon \right), \quad \epsilon \sim \mathcal{N}(0, \sigma^2)
+\end{equation}
+Only the top-2 experts are activated per input, enabling specialization while maintaining efficiency.
+
+\subsection{Training Objective}
+
+The total loss combines classification and auxiliary terms:
+\begin{equation}
+\loss{total} = \crossentropy + \lambda_{\text{moe}} \loss{moe}{load} + \lambda_{\text{au}} \loss{AU}{aux}
+\end{equation}
+where $\loss{moe}{load}$ balances expert utilization and $\loss{AU}{aux}$ provides action unit supervision. ArcFace angular margin loss optionally constrains feature geometry:
+\begin{equation}
+\loss{ArcFace} = -\log \frac{e^{s \cos(\theta_{y_i} + m)}}{e^{s \cos(\theta_{y_i} + m)} + \sum_{j \neq y_i} e^{s \cos(\theta_j)}}
+\end{equation}

@@ -1,0 +1,47 @@
+% experiments_cn.tex - 实验
+
+\section{实验}
+
+\subsection{数据集与评估协议}
+
+我们在CASME II\cite{yan2014casme2}上使用留一受试者交叉验证（LOSO）评估Censor，这是微表情基准的标准协议。
+
+\textbf{CASME II}包含26名受试者在200 fps下采集的247个微表情样本。我们使用四类评估（happiness、surprise、disgust、repression），排除样本数少于5的类别（fear、anger、sadness）。过滤后24名受试者共150个样本。
+
+\textbf{LOSO协议}：每折在23名受试者上训练，1名留出受试者上测试，确保受试者独立性。我们报告24折的平均准确率、F1分数和标准差。
+
+\textbf{跨数据集泛化}：使用3个共享类别（happiness、surprise、disgust）评估CASME II、SMIC\cite{li2013smic}和SAMM\cite{yap2018samm}间的零样本迁移。
+
+\subsection{实现细节}
+
+\subsubsection{预处理}
+
+通过MTCNN进行人脸检测，边界框扩展20\%。人脸调整至224$\times$224。每个片段从起始-顶点-偏移区间均匀采样16帧。像素值归一化为零均值和单位方差。
+
+\subsubsection{训练配置}
+
+\begin{itemize}
+\item 优化器：AdamW，初始学习率$1 \times 10^{-4}$，骨干学习率因子0.1
+\item 权重衰减：0.0（网格搜索发现最优）
+\item 调度器：余弦退火，3轮预热
+\item 批大小：8，2步梯度累积（有效批大小16）
+\item 训练轮数：50，早停（耐心值20）监控训练损失
+\item 正则化：Dropout 0.1，标签平滑0.1
+\item ArcFace：边距0.3，尺度16
+\end{itemize}
+
+\subsubsection{硬件}
+
+实验在配备24GB显存的NVIDIA GPU上进行。单LOSO折约需7分钟；完整24折评估在2--3小时内完成。
+
+\subsection{消融实验设计}
+
+为评估各组件贡献，我们评估：
+\begin{enumerate}
+\item \textbf{仅快通路}：仅3D ResNet-18处理光流
+\item \textbf{仅慢通路}：仅3D Swin Transformer处理RGB+rPPG
+\item \textbf{双通路+无MoE}：两条通路加简单线性分类器
+\item \textbf{完整模型}：双通路+MoE门控（Censor）
+\end{enumerate}
+
+此设计验证：(1) 双通路的必要性，(2) MoE相对于简单融合的贡献。

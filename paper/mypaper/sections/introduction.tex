@@ -1,0 +1,26 @@
+% introduction.tex - Neural Networks format
+
+\section{Introduction}
+\label{sec:introduction}
+
+Facial micro-expressions are involuntary, brief facial movements that occur when an individual attempts to conceal or suppress genuine emotions~\cite{ekman1969nonverbal}. Unlike macro-expressions, which typically last between 0.5 and 4 seconds, micro-expressions have a duration of 1/25 to 1/5 of a second~\cite{ekman2003darwin}. They are characterized by low intensity, partial facial involvement, and rapid onset-apex-offset dynamics, making them exceedingly difficult to detect and recognize, even for trained human coders~\cite{frank2009training}.
+
+The computational modeling of micro-expression recognition has progressed substantially over the past decade, driven by the release of benchmark datasets such as CASME II~\cite{yan2014casme2}, SAMM~\cite{yap2018samm}, SMIC~\cite{li2013smic}, and MMEW~\cite{ben2022survey}. Early approaches relied on handcrafted spatiotemporal features including Local Binary Patterns from Three Orthogonal Planes (LBP-TOP)~\cite{zhao2007lbptop} and optical flow descriptors~\cite{wang2015offapexnet}. These methods, however, are inherently limited by their fixed feature extraction protocols and inability to learn hierarchical representations from data.
+
+The advent of deep learning has catalyzed a paradigm shift in MER. Convolutional neural networks operating on video frames, 3D convolutional networks capturing spatiotemporal volumes~\cite{tran2015c3d}, and Transformer-based architectures leveraging self-attention mechanisms~\cite{liu2022videoSwin} have progressively pushed the state of the art. Despite these advances, existing deep MER systems suffer from a critical limitation: they are architecturally agnostic to the underlying neural mechanisms of human micro-expression perception.
+
+Neuroimaging studies have established that the perception of facial expressions, particularly those that are brief or subliminal, engages a dual-pathway architecture in the human brain~\cite{morris1999amygdala}. The \textbf{fast subcortical pathway} projects from the superior colliculus through the pulvinar to the amygdala, enabling rapid but coarse processing of affective stimuli. The \textbf{slow cortical pathway} engages the primary visual cortex, the fusiform face area (FFA), and the orbitofrontal cortex, supporting fine-grained discriminative analysis~\cite{kanwisher1997ffa}. These pathways operate in parallel and converge at the amygdala, which modulates attention and emotional response.
+
+This paper introduces \textbf{Censor}, a biomimetic dual-pathway framework that explicitly emulates this neurological architecture. Our contributions are as follows:
+
+\begin{enumerate}
+\item \textbf{Biomimetic architectural design}: We propose a dual-pathway network comprising a fast 3D ResNet-18 pathway (analogous to the subcortical route) processing optical flow and a slow 3D Swin Transformer pathway (analogous to the cortical route) processing RGB video supplemented with remote photoplethysmography (rPPG) signals.
+
+\item \textbf{Effective fusion mechanism}: Censor integrates amygdala-inspired attention gating and squeeze-excitation fusion to combine complementary features from both pathways.
+
+\item \textbf{Mixture-of-experts classification}: A noisy top-2 MoE gating mechanism enables specialized expert routing for different micro-expression categories.
+
+\item \textbf{Comprehensive empirical validation}: We evaluate Censor on CASME II with leave-one-subject-out (LOSO) cross-validation, achieving 85\% accuracy and 0.80 F1-score for 4-class recognition. Cross-dataset experiments demonstrate strong generalization (0.74--0.76 accuracy) when transferring to SMIC and SAMM.
+\end{enumerate}
+
+The remainder of this paper is organized as follows. Section~\ref{sec:related} reviews related work in MER and biomimetic computing. Section~\ref{sec:method} presents the proposed Censor architecture in detail. Section~\ref{sec:experiments} describes the experimental setup. Section~\ref{sec:results} reports results and provides discussion. Section~\ref{sec:conclusion} concludes the paper.

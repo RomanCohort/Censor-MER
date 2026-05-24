@@ -1,0 +1,54 @@
+{
+  "name": "Censor",
+  "version": "1.0.0",
+  "description": "Biomimetic Dual-Pathway Micro-Expression Recognition System",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win",
+    "pack": "electron-builder --dir"
+  },
+  "author": "Your Name",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1"
+  },
+  "build": {
+    "appId": "com.censor.app",
+    "productName": "Censor",
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "**/*.html",
+      "**/*.css",
+      "**/*.js",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../censor",
+        "to": "censor",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ]
+  }
+}

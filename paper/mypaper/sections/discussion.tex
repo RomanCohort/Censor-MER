@@ -1,0 +1,30 @@
+% discussion.tex - Neural Networks format
+
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{Interpretation of Results}
+
+Censor's competitive performance (Acc=0.85, F1=0.80 on CASME II 4-class LOSO) validates the biomimetic dual-pathway design. The fast pathway's aggressive temporal downsampling captures motion signatures efficiently, while the slow pathway's high-resolution processing discriminates subtle facial configurations. MoE gating enables category-specific expert routing, potentially explaining the improvement over simple fusion baselines.
+
+\subsection{Cross-Dataset Generalization}
+
+The 0.74--0.76 accuracy when transferring from CASME II to SMIC/SAMM demonstrates that learned features are not dataset-specific. This generalization is notable given the distinct acquisition conditions across datasets (different cameras, frame rates, lighting, ethnic diversity). The lower performance from SAMM $\rightarrow$ others reflects SAMM's challenging characteristics—lower micro-expression intensity and diverse subject pool.
+
+\subsection{Comparison with Prior Work}
+
+Unlike single-backbone approaches~\cite{ben2022survey}, Censor explicitly models the dual visual pathways observed in neuroscience~\cite{morris1999amygdala,kanwisher1997ffa}. This architectural choice aligns with the Two-Stream hypothesis~\cite{simonyan2014twostream} extended to temporal modeling. MoE classification differs from standard softmax by enabling specialized feature subspaces per expression category.
+
+\subsection{Practical Implications}
+
+Censor's biomimetic design offers interpretability: the fast pathway corresponds to rapid, coarse motion detection; the slow pathway corresponds to fine-grained appearance analysis. This mapping may facilitate clinical applications where model behavior must align with known neural mechanisms.
+
+\subsection{Limitations}
+
+Several limitations warrant acknowledgment:
+\begin{enumerate}
+\item \textbf{Computational cost}: Dual pathways increase model size and training time compared to single-backbone methods.
+\item \textbf{Fixed temporal window}: The 16-frame constraint limits adaptation to micro-expressions of varying duration.
+\item \textbf{Single-face assumption}: Multi-person scenarios, occlusions, and extreme head poses are not explicitly handled.
+\item \textbf{Dataset scope}: Evaluation focused on CASME II; broader validation on SAMM, SMIC, and cross-dataset protocols would strengthen claims.
+\end{enumerate}

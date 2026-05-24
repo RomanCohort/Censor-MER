@@ -1,0 +1,30 @@
+% math_commands.tex - Mathematical notation for Neural Networks paper
+
+% Vector and matrix notation
+\newcommand{\vect}[1]{\mathbf{#1}}
+\newcommand{\mat}[1]{\mathbf{#1}}
+\newcommand{\set}[1]{\mathcal{#1}}
+
+% Operators
+\newcommand{\norm}[1]{\left\| #1 \right\|}
+\newcommand{\abs}[1]{\left| #1 \right|}
+\newcommand{\inner}[2]{\langle #1, #2 \rangle}
+
+% Probability and statistics
+\newcommand{\prob}[1]{\mathbb{P}\left[ #1 \right]}
+\newcommand{\expect}[1]{\mathbb{E}\left[ #1 \right]}
+\newcommand{\Var}[1]{\mathrm{Var}\left[ #1 \right]}
+
+% Neural network specific
+\newcommand{\sigmoid}{\sigma}
+\newcommand{\softmax}{\mathrm{softmax}}
+\newcommand{\relu}{\mathrm{ReLU}}
+\newcommand{\conv}{\mathrm{conv}}
+
+% Loss functions
+\newcommand{\loss}[2]{\mathcal{L}_{#1}\left( #2 \right)}
+\newcommand{\crossentropy}{\mathcal{L}_{\mathrm{CE}}}
+\newcommand{\focalloss}{\mathcal{L}_{\mathrm{Focal}}}
+
+% Dimensions
+\newcommand{\dim}[1]{\mathbb{R}^{#1}}

@@ -1,0 +1,98 @@
+{
+  "experiment_results": {
+    "casme2_loso_4class": {
+      "accuracy": 0.8478,
+      "accuracy_std": 0.1705,
+      "f1_score": 0.8020,
+      "f1_std": 0.2157,
+      "num_folds": 24,
+      "classes": ["happiness", "surprise", "disgust", "repression"],
+      "per_fold_accuracy": [
+        0.667, 0.889, 0.600, 1.000, 0.857, 0.750,
+        0.800, 1.000, 0.800, 1.000, 0.727, 1.000,
+        1.000, 1.000, 0.333, 0.613, 0.727, 1.000,
+        1.000, 1.000, 0.875, 1.000, 0.800, 0.909
+      ],
+      "date": "2024-05-23"
+    },
+    "cross_dataset_generalization": {
+      "protocol": "3-class shared (happiness, surprise, disgust)",
+      "results": {
+        "casme2_to_smic": {"accuracy": 0.7378, "f1": 0.7254, "n_samples": 164},
+        "casme2_to_samm": {"accuracy": 0.7544, "f1": 0.7218, "n_samples": 114},
+        "smic_to_casme2": {"accuracy": 0.7561, "f1": 0.6849, "n_samples": 123},
+        "smic_to_samm": {"accuracy": 0.7018, "f1": 0.6232, "n_samples": 114},
+        "samm_to_casme2": {"accuracy": 0.6748, "f1": 0.6589, "n_samples": 123},
+        "samm_to_smic": {"accuracy": 0.6890, "f1": 0.6242, "n_samples": 164}
+      },
+      "source_performance": {
+        "casme2": {"accuracy": 0.84, "f1": 0.838},
+        "smic": {"accuracy": 1.00, "f1": 1.00},
+        "samm": {"accuracy": 1.00, "f1": 1.00}
+      },
+      "date": "2024-05-23"
+    },
+    "ablation_study": {
+      "status": "completed_partial",
+      "results": {
+        "fast_only": {
+          "accuracy": 0.8576,
+          "accuracy_std": 0.1999,
+          "f1_score": 0.8392,
+          "f1_std": 0.2377,
+          "num_folds": 24
+        },
+        "slow_only": {
+          "accuracy": 0.6687,
+          "accuracy_std": 0.2969,
+          "f1_score": 0.5930,
+          "f1_std": 0.3132,
+          "num_folds": 24
+        },
+        "dual_no_moe": {
+          "status": "not_run",
+          "reason": "compute_budget"
+        },
+        "full_model": {
+          "accuracy": 0.8478,
+          "accuracy_std": 0.1705,
+          "f1_score": 0.8020,
+          "f1_std": 0.2157,
+          "num_folds": 24
+        }
+      },
+      "key_findings": [
+        "Fast-only achieves best performance (Acc=0.86, F1=0.84)",
+        "Optical flow is primary contributor to ME recognition",
+        "Slow-only performs poorly (Acc=0.67), RGB+rPPG needs motion",
+        "Dual fusion ≈ Fast-only, suggesting fusion optimization potential"
+      ],
+      "date": "2024-05-24"
+    }
+  },
+  "method_details": {
+    "model_name": "Censor",
+    "framework": "PyTorch",
+    "components": {
+      "fast_pathway": "3D ResNet-18 variant",
+      "slow_pathway": "3D Swin Transformer",
+      "fusion": "Squeeze-excitation attention",
+      "classification": "Noisy top-2 MoE gating"
+    },
+    "parameters": "68.35M total",
+    "training_config": {
+      "optimizer": "AdamW",
+      "lr": 1e-4,
+      "backbone_lr_factor": 0.1,
+      "weight_decay": 0.0,
+      "batch_size": 8,
+      "grad_accum": 2,
+      "epochs": 50,
+      "patience": 20,
+      "warmup_epochs": 3,
+      "arcface_margin": 0.3,
+      "arcface_scale": 16,
+      "label_smoothing": 0.1
+    }
+  }
+}

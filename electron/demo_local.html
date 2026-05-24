@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Censor - 本地演示</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: #1a1a2e;
+      color: #fff;
+      padding: 20px;
+      min-height: 100vh;
+    }
+
+    h1 {
+      font-size: 28px;
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    h1::before {
+      content: '🧠';
+    }
+
+    .subtitle {
+      color: #888;
+      margin-bottom: 30px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 20px;
+      margin-bottom: 30px;
+    }
+
+    .card {
+      background: #16213e;
+      border-radius: 10px;
+      padding: 20px;
+    }
+
+    .card h2 {
+      font-size: 18px;
+      margin-bottom: 15px;
+      color: #4a9eff;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .metric {
+      display: flex;
+      justify-content: space-between;
+      padding: 10px 0;
+      border-bottom: 1px solid #333;
+    }
+
+    .metric:last-child {
+      border-bottom: none;
+    }
+
+    .metric .label {
+      color: #888;
+    }
+
+    .metric .value {
+      font-weight: bold;
+      color: #4a9eff;
+    }
+
+    .progress-bar {
+      height: 8px;
+      background: #333;
+      border-radius: 4px;
+      margin: 5px 0 15px;
+      overflow: hidden;
+    }
+
+    .progress-bar .fill {
+      height: 100%;
+      background: linear-gradient(90deg, #4a9eff, #00d4aa);
+      border-radius: 4px;
+      transition: width 0.5s;
+    }
+
+    .btn {
+      background: linear-gradient(90deg, #4a9eff, #3a8eef);
+      color: #fff;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 16px;
+      font-weight: bold;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+
+    .btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 5px 20px rgba(74, 158, 255, 0.4);
+    }
+
+    .btn:active {
+      transform: translateY(0);
+    }
+
+    .result-grid {
+      display: grid;
+      grid-template-columns: repeat(7, 1fr);
+      gap: 10px;
+      margin-top: 10px;
+    }
+
+    .result-item {
+      text-align: center;
+      padding: 10px;
+      background: #0a0a0a;
+      border-radius: 8px;
+    }
+
+    .result-item .name {
+      font-size: 12px;
+      color: #888;
+    }
+
+    .result-item .prob {
+      font-size: 16px;
+      font-weight: bold;
+      color: #4a9eff;
+    }
+
+    .expert-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin-top: 10px;
+    }
+
+    .expert-item {
+      padding: 15px;
+      background: #0a0a0a;
+      border-radius: 8px;
+      text-align: center;
+    }
+
+    .expert-item.active {
+      border: 2px solid #00d4aa;
+    }
+
+    .expert-item .name {
+      font-size: 14px;
+      color: #888;
+    }
+
+    .expert-item .dist {
+      font-size: 20px;
+      font-weight: bold;
+      color: #00d4aa;
+    }
+
+    .au-list {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin-top: 10px;
+    }
+
+    .au-item {
+      padding: 8px;
+      border-radius: 5px;
+      text-align: center;
+      font-size: 12px;
+    }
+
+    .au-item.active {
+      background: #00d4aa;
+      color: #000;
+    }
+
+    .au-item.inactive {
+      background: #333;
+      color: #666;
+    }
+
+    /* Architecture diagram */
+    .arch-diagram {
+      background: #0a0a0a;
+      border-radius: 10px;
+      padding: 20px;
+      font-family: monospace;
+      font-size: 12px;
+      line-height: 1.8;
+      white-space: pre;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+  <h1>Censor</h1>
+  <p class="subtitle">仿生双通道微表情识别系统 - 本地演示</p>
+
+  <button class="btn" onclick="runDemo()" style="margin-bottom: 30px;">
+    🔄 运行推理
+  </button>
+
+  <div class="grid">
+    <!-- 微表情预测 -->
+    <div class="card">
+      <h2>🎭 微表情预测</h2>
+      <div class="result-grid" id="resultGrid">
+        <div class="result-item">
+          <div class="name">Joy</div>
+          <div class="prob">--</div>
+        </div>
+        <div class="result-item">
+          <div class="name">Sadness</div>
+          <div class="prob">--</div>
+        </div>
+        <div class="result-item">
+          <div class="name">Fear</div>
+          <div class="prob">--</div>
+        </div>
+        <div class="result-item">
+          <div class="name">Anger</div>
+          <div class="prob">--</div>
+        </div>
+        <div class="result-item">
+          <div class="name">Surprise</div>
+          <div class="prob">--</div>
+        </div>
+        <div class="result-item">
+          <div class="name">Disgust</div>
+          <div class="prob">--</div>
+        </div>
+        <div class="result-item">
+          <div class="name">Contempt</div>
+          <div class="prob">--</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 专家门控 -->
+    <div class="card">
+      <h2>🎛️ 专家门控</h2>
+      <div class="expert-grid" id="expertGrid">
+        <div class="expert-item">
+          <div class="name">Expert 1</div>
+          <div class="dist">--</div>
+        </div>
+        <div class="expert-item">
+          <div class="name">Expert 2</div>
+          <div class="dist">--</div>
+        </div>
+        <div class="expert-item">
+          <div class="name">Expert 3</div>
+          <div class="dist">--</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <!-- AU激活 -->
+    <div class="card">
+      <h2>🔥 活跃AU</h2>
+      <div class="au-list" id="auList">
+        <div class="au-item">AU1</div>
+        <div class="au-item">AU2</div>
+        <div class="au-item">AU4</div>
+        <div class="au-item">AU6</div>
+        <div class="au-item">AU7</div>
+        <div class="au-item">AU12</div>
+        <div class="au-item">AU15</div>
+        <div class="au-item">AU17</div>
+        <div class="au-item">AU23</div>
+      </div>
+    </div>
+
+    <!-- Apex帧 -->
+    <div class="card">
+      <h2>⏱️ Apex帧</h2>
+      <div style="text-align: center; padding: 20px;">
+        <div style="font-size: 48px; font-weight: bold; color: #4a9eff;">
+          t = <span id="apexFrame">--</span>
+        </div>
+        <div style="color: #888; margin-top: 10px;">帧位置</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 系统信息 -->
+  <div class="grid">
+    <div class="card">
+      <h2>📊 系统参数</h2>
+      <div class="metric">
+        <span class="label">总参数量</span>
+        <span class="value">~30M</span>
+      </div>
+      <div class="metric">
+        <span class="label">快通道</span>
+        <span class="value">3D ResNet-18</span>
+      </div>
+      <div class="metric">
+        <span class="label">���通��</span>
+        <span class="value">3D Swin-T</span>
+      </div>
+      <div class="metric">
+        <span class="label">专家数量</span>
+        <span class="value">3</span>
+      </div>
+      <div class="metric">
+        <span class="label">AU类别</span>
+        <span class="value">28</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>🏗️ 架构</h2>
+      <div class="arch-diagram">
+┌─────────────────────────────────┐
+│        输入视频 (16帧)             │
+└────────────┬────────────────────┘
+             │
+    ┌────────┼────────┐
+    ▼        ▼        ▼
+┌──────┐  ┌──────┐  ┌──────┐
+│显著性 │  │ rPPG │  │ 光流 │
+│检测  │  │提取 │  │ 计算 │
+└──┬───┘  └──┬───┘  └──┬───┘
+   │         │         │
+   ▼         ▼         ▼
+┌─────────────────────────────┐
+│   双通道特征提取           │
+│ 3D ResNet-18 │ 3D Swin │
+└────────────┬──────────────┘
+             │
+             ▼
+┌─────────────────────────────┐
+│   特征融合 (TSFmicroFusion) │
+└────────────┬──────────────┘
+             │
+             ▼
+┌─────────────────────────────┐
+│   注意力模块               │
+│Amygdala │ FFA │ CASANet │
+└────────────┬──────────────┘
+             │
+             ▼
+┌─────────────────────────────┐
+│   MoE输出 (3 experts)     │
+└─────────┬───────────────┬───┘
+          ▼               ▼
+     7类ME           28类AU
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const emotionNames = ['Joy', 'Sadness', 'Fear', 'Anger', 'Surprise', 'Disgust', 'Contempt'];
+    const auNames = ['AU1', 'AU2', 'AU4', 'AU6', 'AU7', 'AU9', 'AU10', 'AU12', 'AU14', 'AU15', 'AU17', 'AU20', 'AU23', 'AU25'];
+
+    function runDemo() {
+      // 生成随机预测结果
+
+      // 1. 情绪概率
+      let probs = Array(7).fill(0).map(() => Math.random());
+      const sum = probs.reduce((a, b) => a + b, 0);
+      probs = probs.map(p => (p / sum * 100).toFixed(1));
+
+      const resultItems = document.querySelectorAll('.result-item .prob');
+      resultItems.forEach((el, i) => {
+        el.textContent = probs[i] + '%';
+        el.style.color = probs[i] > 30 ? '#00d4aa' : '#4a9eff';
+      });
+
+      // 2. 专家门控
+      let expertDist = Array(3).fill(0).map(() => Math.random());
+      const expertSum = expertDist.reduce((a, b) => a + b, 0);
+      expertDist = expertDist.map(d => (d / expertSum * 100).toFixed(0));
+
+      const expertItems = document.querySelectorAll('.expert-item .dist');
+      expertItems.forEach((el, i) => {
+        el.textContent = expertDist[i] + '%';
+      });
+
+      // 3. AU激活
+      const activeAus = [];
+      while (activeAus.length < 5) {
+        const idx = Math.floor(Math.random() * 14);
+        if (!activeAus.includes(idx)) activeAus.push(idx);
+      }
+
+      const auItems = document.querySelectorAll('.au-item');
+      auItems.forEach((el, i) => {
+        if (activeAus.includes(i)) {
+          el.className = 'au-item active';
+        } else {
+          el.className = 'au-item inactive';
+        }
+      });
+
+      // 4. Apex帧
+      const apexFrame = Math.floor(Math.random() * 12 + 2);
+      document.getElementById('apexFrame').textContent = apexFrame;
+    }
+
+    // 初始运行一次
+    runDemo();
+  </script>
+
+</body>
+</html>

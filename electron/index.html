@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:*">
+  <title>Censor - 微表情识别系统</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: #0a0a0a;
+      color: #fff;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Title bar */
+    .titlebar {
+      height: 40px;
+      background: linear-gradient(90deg, #1a1a2e 0%, #16213e 100%);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 20px;
+      -webkit-app-region: drag;
+    }
+
+    .titlebar h1 {
+      font-size: 14px;
+      font-weight: 500;
+      color: #e0e0e0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .titlebar h1::before {
+      content: '🧠';
+      font-size: 18px;
+    }
+
+    .titlebar .controls {
+      display: flex;
+      gap: 10px;
+      -webkit-app-region: no-drag;
+    }
+
+    .titlebar button {
+      background: transparent;
+      border: none;
+      color: #888;
+      cursor: pointer;
+      padding: 5px 10px;
+      border-radius: 4px;
+      font-size: 12px;
+      transition: all 0.2s;
+    }
+
+    .titlebar button:hover {
+      background: #333;
+      color: #fff;
+    }
+
+    .titlebar button.close:hover {
+      background: #e81123;
+      color: #fff;
+    }
+
+    /* Loading state */
+    .loading {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 20px;
+    }
+
+    .loading .spinner {
+      width: 50px;
+      height: 50px;
+      border: 3px solid #333;
+      border-top-color: #4a9eff;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .loading p {
+      color: #888;
+      font-size: 14px;
+    }
+
+    /* Iframe container */
+    .iframe-container {
+      flex: 1;
+      display: none;
+    }
+
+    .iframe-container.loaded {
+      display: block;
+    }
+
+    iframe {
+      width: 100%;
+      height: 100%;
+      border: none;
+      background: #fff;
+    }
+
+    /* Error state */
+    .error {
+      flex: 1;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 15px;
+    }
+
+    .error.show {
+      display: flex;
+    }
+
+    .error h2 {
+      color: #e81123;
+      font-size: 24px;
+    }
+
+    .error p {
+      color: #888;
+      font-size: 14px;
+    }
+
+    .error button {
+      background: #4a9eff;
+      color: #fff;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+
+    .error button:hover {
+      background: #3a8eef;
+    }
+  </style>
+</head>
+<body>
+  <!-- Title bar -->
+  <div class="titlebar">
+    <h1>Censor - 仿生双通道微表情识别系统</h1>
+    <div class="controls">
+      <button onclick="location.reload()">🔄 刷新</button>
+      <button onclick="window.minimize()">➖ 最小化</button>
+      <button onclick="window.maximize()">⬜ 最大化</button>
+      <button class="close" onclick="window.close()">✕ 关闭</button>
+    </div>
+  </div>
+
+  <!-- Loading -->
+  <div class="loading" id="loading">
+    <div class="spinner"></div>
+    <p>正在启动 Streamlit 服务...</p>
+  </div>
+
+  <!-- Iframe -->
+  <div class="iframe-container" id="iframeContainer">
+    <iframe id="appFrame" src="http://localhost:8501"></iframe>
+  </div>
+
+  <!-- Error -->
+  <div class="error" id="error">
+    <h2>⚠️ 无法启动</h2>
+    <p>请确保已安装 Python 和 Streamlit</p>
+    <button onclick="localDemo()">使用本地演示模式</button>
+  </div>
+
+  <script>
+    const loading = document.getElementById('loading');
+    const iframeContainer = document.getElementById('iframeContainer');
+    const iframe = document.getElementById('appFrame');
+    const errorDiv = document.getElementById('error');
+
+    // Check if Streamlit is ready
+    let checkCount = 0;
+    const maxChecks = 30;
+
+    function checkStreamlit() {
+      checkCount++;
+      fetch('http://localhost:8501', { method: 'HEAD' })
+        .then(() => {
+          // Streamlit is ready
+          loading.style.display = 'none';
+          iframeContainer.classList.add('loaded');
+        })
+        .catch(() => {
+          // Not ready yet
+          if (checkCount < maxChecks) {
+            setTimeout(checkStreamlit, 1000);
+          } else {
+            showError();
+          }
+        });
+    }
+
+    function showError() {
+      loading.style.display = 'none';
+      errorDiv.classList.add('show');
+    }
+
+    function localDemo() {
+      // Load local demo page
+      errorDiv.style.display = 'none';
+      iframeContainer.style.display = 'block';
+      iframe.src = 'demo_local.html';
+    }
+
+    // Minimize/Maximize/Close functions
+    window.minimize = () => {
+      // Called from button, requires IPC in real app
+      console.log('Minimize');
+    };
+
+    window.maximize = () => {
+      console.log('Maximize');
+    };
+
+    window.close = () => {
+      window.close();
+    };
+
+    // Start checking after a short delay
+    setTimeout(checkStreamlit, 2000);
+  </script>
+</body>
+</html>

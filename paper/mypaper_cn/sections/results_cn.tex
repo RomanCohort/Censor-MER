@@ -1,0 +1,81 @@
+% results_cn.tex - 结果
+
+\section{结果}
+
+\subsection{CASME II主实验}
+
+表\ref{tab:main_results_cn}展示Censor在CASME II四类LOSO评估中的性能。
+
+\begin{table}[htbp]
+\centering
+\caption{CASME II四类LOSO结果（happiness、surprise、disgust、repression）}
+\label{tab:main_results_cn}
+\begin{tabular}{lcc}
+\toprule
+方法 & 准确率 & F1分数 \\
+\midrule
+LBP-TOP\cite{zhao2007lbptop} & 0.65 & --- \\
+Off-ApexNet\cite{wang2015offapexnet} & 0.68 & --- \\
+STSTNet\cite{ststnet2021} & 0.74 & --- \\
+GRA-NET\cite{graNet2021} & 0.80 & 0.78 \\
+MERM\cite{merm2023} & --- & 0.84 \\
+DRConv\cite{drconv2024} & --- & 0.85 \\
+\textbf{Censor（本文）} & \textbf{0.85} $\pm$ 0.17 & \textbf{0.80} $\pm$ 0.22 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Censor达到0.85准确率和0.80 F1分数，展示了竞争性性能。标准差（$\pm$0.17）反映了LOSO评估固有的受试者变异。单折结果范围从0.33（困难受试者）到1.00（理想受试者），大多数折达到0.70--0.90。
+
+\subsection{跨数据集泛化}
+
+表\ref{tab:cross_dataset_cn}报告使用3个共享类别的零样本迁移结果。
+
+\begin{table}[htbp]
+\centering
+\caption{跨数据集泛化（3类：happiness、surprise、disgust）}
+\label{tab:cross_dataset_cn}
+\begin{tabular}{lccc}
+\toprule
+源$\rightarrow$目标 & CASME II & SMIC & SAMM \\
+\midrule
+CASME II $\rightarrow$ & 0.84 & 0.74 & 0.75 \\
+SMIC $\rightarrow$ & 0.76 & 1.00 & 0.70 \\
+SAMM $\rightarrow$ & 0.67 & 0.69 & 1.00 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+CASME II $\rightarrow$ SMIC/SAMM达到0.74--0.75准确率，展示了强跨数据集泛化能力。从大数据集（CASME II）迁移到小数据集（SMIC、SAMM）优于反向迁移，符合大训练集产生更泛化特征的预期。
+
+\subsection{消融实验}
+
+表\ref{tab:ablation_cn}展示组件贡献分析。
+
+\begin{table}[htbp]
+\centering
+\caption{CASME II四类LOSO消融实验}
+\label{tab:ablation_cn}
+\begin{tabular}{lcc}
+\toprule
+配置 & 准确率 & F1分数 \\
+\midrule
+仅快通路（3D ResNet-18处理光流） & 0.86 $\pm$ 0.20 & 0.84 $\pm$ 0.24 \\
+仅慢通路（3D Swin-T处理RGB+rPPG） & 0.67 $\pm$ 0.30 & 0.59 $\pm$ 0.31 \\
+双通路+无MoE & [数据缺失] & [数据缺失] \\
+\textbf{完整模型（Censor：双通路+MoE）} & \textbf{0.85} $\pm$ 0.17 & \textbf{0.80} $\pm$ 0.22 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+消融实验揭示了一个意外发现：仅快通路即可达到与完整模型相当的性能（0.86 vs 0.85准确率）。这表明光流特征是微表情识别的主要贡献者，能够捕获定义微表情的细微面部肌肉运动。仅慢通路性能显著较差（0.67准确率），说明RGB+rPPG特征需要配合运动信息。双通路融合效果与仅快通路相似，表明未来工作中融合策略有优化空间。
+
+\subsection{分析}
+
+\subsubsection{单折性能分布}
+
+LOSO结果存在较大方差，源于受试者异质性。样本较少或面部形态异常的受试者产生较低单折准确率。这种方差是自发微表情数据集固有的，也是LOSO作为标准评估协议的原因。
+
+\subsubsection{跨数据集迁移模式}
+
+SAMM $\rightarrow$其他数据集性能较低（0.67--0.69），归因于SAMM较低的微表情强度和不同采集设置。CASME II更高时间分辨率（200 fps）和更大样本量产生更鲁棒的训练表示。

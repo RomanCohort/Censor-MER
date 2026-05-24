@@ -1,0 +1,93 @@
+% method_cn.tex - 方法
+
+\section{方法}
+
+\subsection{架构概述}
+
+Censor是一种仿生双通路神经架构，在PyTorch中实现。系统通过两条互补通路处理16帧224$\times$224分辨率视频片段，经融合后进行分类。
+
+\textbf{快通路}：3D ResNet-18变体处理光流，类比皮层下视觉路径。该通路以激进的时间下采样捕获快速运动模式，输出512维特征向量。
+
+\textbf{慢通路}：3D Swin Transformer处理RGB帧和远程光电容积描记（rPPG）信号，类比皮层视觉路径。该通路全程保持高空间分辨率，输出768维表示。
+
+\textbf{融合}：两条通路特征通过挤压激励注意力结合，随后经杏仁核启发的门控调制融合表示。
+
+\textbf{分类}：噪声Top-2混合专家机制将输入路由至专门化专家网络，实现类别特定特征辨别。
+
+\subsection{仿生预处理}
+
+\subsubsection{光流提取}
+
+快通路输入通过Dual TV-L1光流计算\cite{wang2015offapexnet}，优化：
+\begin{equation}
+E(\vect{u}) = \int_\Omega \left( |\nabla u_1| + |\nabla u_2| \right) d\vect{x} + \lambda \int_\Omega \rho(\vect{x}, \vect{u}) d\vect{x}
+\end{equation}
+其中$\vect{u} = (u_1, u_2)$为位移场，$\rho$为亮度恒定项。TV正则化保留面部肌肉边界处的运动不连续性。
+
+\subsubsection{rPPG提取}
+
+远程光电容积描记从细微颜色变化提取心信号：
+\begin{equation}
+\vect{C}(t) = 0.77 \cdot R(t) - 0.51 \cdot G(t) - 0.26 \cdot B(t)
+\end{equation}
+色度信号经带通滤波（0.5--4.0 Hz）隔离心率范围，提供生理唤醒线索。
+
+\subsection{快通路：3D ResNet-18}
+
+快通路包含三个阶段，通道维度递增，时间分辨率递减：
+\begin{itemize}
+\item 阶段1：输入$\dim{2\times 16 \times 112 \times 112}$，输出$\dim{64 \times 8 \times 56 \times 56}$
+\item 阶段2：两个残差块，输出$\dim{128 \times 4 \times 28 \times 28}$
+\item 阶段3：两个残差块，输出$\dim{256 \times 2 \times 14 \times 14}$
+\item 全局池化得到$\vect{f}_{\text{fast}} \in \dim{512}$
+\end{itemize}
+
+残差块形式：
+\begin{equation}
+\vect{z}^{(i+1)} = \relu\left( \vect{z}^{(i)} + \mathcal{F}(\vect{z}^{(i)}; \vect{W}^{(i)}) \right)
+\end{equation}
+其中$\mathcal{F}$包含带批归一化的3D卷积。Dropout（率0.1）提供正则化。
+
+\subsection{慢通路：3D Swin Transformer}
+
+慢通路处理拼接的RGB和rPPG信号（$\dim{6 \times 16 \times 224 \times 224}$），经四个层次化阶段：
+\begin{itemize}
+\item 阶段1：96维嵌入，$(8 \times 14 \times 14)$窗口分辨率
+\item 阶段2：192维，patch合并后$(8 \times 7 \times 7)$窗口
+\item 阶段3：384维，$(4 \times 7 \times 7)$窗口
+\item 阶段4：768维，$(2 \times 7 \times 7)$窗口，输出$\vect{f}_{\text{slow}} \in \dim{768}$
+\end{itemize}
+
+移位窗口多头自注意力（SW-MSA）实现跨窗口连接：
+\begin{equation}
+\text{Attention}(\vect{Q}, \vect{K}, \vect{V}) = \softmax\left( \frac{\vect{Q}\vect{K}^\top}{\sqrt{d_k}} + \vect{B} \right) \vect{V}
+\end{equation}
+其中$\vect{B}$编码相对位置偏置。
+
+\subsection{融合与分类}
+
+\subsubsection{特征融合}
+
+拼接特征$\vect{f}_{\text{concat}} = [\vect{f}_{\text{fast}}; \vect{f}_{\text{slow}}] \in \dim{1280}$经挤压激励注意力投影至$\dim{1024}$：
+\begin{equation}
+\vect{f}_{\text{fused}} = \sigma(\vect{W}_2 \cdot \relu(\vect{W}_1 \cdot \text{GAP}(\vect{f}_{\text{concat}}))) \cdot \vect{f}_{\text{concat}}
+\end{equation}
+
+\subsubsection{混合专家}
+
+噪声Top-2门控选择专家网络：
+\begin{equation}
+G(\vect{x}) = \softmax\left( \vect{W}_g \vect{x} + \epsilon \right), \quad \epsilon \sim \mathcal{N}(0, \sigma^2)
+\end{equation}
+每个输入仅激活Top-2专家，实现专门化同时保持效率。
+
+\subsection{训练目标}
+
+总损失结合分类和辅助项：
+\begin{equation}
+\loss{total} = \crossentropy + \lambda_{\text{moe}} \loss{moe}{load} + \lambda_{\text{au}} \loss{AU}{aux}
+\end{equation}
+其中$\loss{moe}{load}$平衡专家利用，$\loss{AU}{aux}$提供动作单元监督。ArcFace角边距损失可选约束特征几何：
+\begin{equation}
+\loss{ArcFace} = -\log \frac{e^{s \cos(\theta_{y_i} + m)}}{e^{s \cos(\theta_{y_i} + m)} + \sum_{j \neq y_i} e^{s \cos(\theta_j)}}
+\end{equation}

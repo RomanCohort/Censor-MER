@@ -1,0 +1,48 @@
+% experiments.tex - Neural Networks format
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Datasets and Evaluation Protocol}
+
+We evaluate Censor on CASME II~\cite{yan2014casme2} with Leave-One-Subject-Out (LOSO) cross-validation, the standard protocol for micro-expression benchmarking.
+
+\textbf{CASME II} contains 247 micro-expression samples from 26 subjects at 200 fps. We use 4-class evaluation (happiness, surprise, disgust, repression), excluding categories with fewer than 5 samples (fear, anger, sadness). After filtering, 150 samples remain across 24 subjects.
+
+\textbf{LOSO Protocol}: Each fold trains on 23 subjects and tests on 1 held-out subject, ensuring subject independence. We report mean accuracy, F1-score, and standard deviation across 24 folds.
+
+\textbf{Cross-Dataset Generalization}: We evaluate zero-shot transfer between CASME II, SMIC~\cite{li2013smic}, and SAMM~\cite{yap2018samm} using 3 shared classes (happiness, surprise, disgust).
+
+\subsection{Implementation Details}
+
+\subsubsection{Preprocessing}
+
+Face detection via MTCNN with 20\% bounding box expansion. Faces resized to 224$\times$224. Each clip uniformly sampled to 16 frames from onset-apex-offset interval. Pixel values normalized to zero mean and unit variance.
+
+\subsubsection{Training Configuration}
+
+\begin{itemize}
+\item Optimizer: AdamW with initial LR $1 \times 10^{-4}$, backbone LR factor 0.1
+\item Weight decay: 0.0 (found optimal through grid search)
+\item Scheduler: Cosine annealing with 3-epoch warmup
+\item Batch size: 8 with 2-step gradient accumulation (effective batch 16)
+\item Epochs: 50 with early stopping (patience 20) on train loss
+\item Regularization: Dropout 0.1, label smoothing 0.1
+\item ArcFace: margin 0.3, scale 16
+\end{itemize}
+
+\subsubsection{Hardware}
+
+Experiments conducted on NVIDIA GPU with 24GB VRAM. Single LOSO fold requires approximately 7 minutes; full 24-fold evaluation completes in 2--3 hours.
+
+\subsection{Ablation Study Design}
+
+To assess each component's contribution, we evaluate:
+\begin{enumerate}
+\item \textbf{Fast-only}: 3D ResNet-18 on optical flow alone
+\item \textbf{Slow-only}: 3D Swin Transformer on RGB+rPPG alone
+\item \textbf{Dual + NoMoE}: Both pathways with simple linear classifier
+\item \textbf{Full model}: Dual pathways + MoE gating (Censor)
+\end{enumerate}
+
+This design validates: (1) necessity of dual pathways, (2) MoE contribution over simple fusion.

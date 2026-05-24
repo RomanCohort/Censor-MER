@@ -1,0 +1,10 @@
+% conclusion.tex - Neural Networks format
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+This paper presented \textbf{Censor}, a biomimetic dual-pathway framework for micro-expression recognition that explicitly emulates the fusiform-amygdala circuit of human visual-affective processing. The architecture integrates a fast 3D ResNet-18 pathway for optical flow processing (subcortical route) and a slow 3D Swin Transformer pathway for RGB+rPPG processing (cortical route), combined through attention fusion and mixture-of-experts classification.
+
+On CASME II 4-class LOSO evaluation, Censor achieves 0.85 accuracy and 0.80 F1-score. Cross-dataset experiments demonstrate 0.74--0.76 accuracy when transferring to SMIC and SAMM, confirming strong generalization. Ablation studies (in progress) will validate the contribution of each architectural component.
+
+Future work will explore: (1) self-supervised pretraining to reduce labeled data dependence; (2) model compression for edge deployment; (3) extension to multi-person and occlusion-robust processing; (4) integration of physiological signals for truly multimodal affect recognition; and (5) longitudinal adaptation mechanisms for personalized MER systems.

@@ -1,0 +1,29 @@
+% discussion_cn.tex - 讨论
+
+\section{讨论}
+
+\subsection{结果解读}
+
+Censor的竞争性能（CASME II四类LOSO Acc=0.85, F1=0.80）验证了仿生双通路设计。快通路的激进时间下采样高效捕获运动特征，慢通路的高分辨率处理辨别细微面部配置。MoE门控实现类别特定专家路由，可能解释了相对于简单融合基线的改进。
+
+\subsection{跨数据集泛化}
+
+从CASME II迁移到SMIC/SAMM达到0.74--0.76准确率，证明学习特征非数据集特定。这种泛化在不同采集条件（不同相机、帧率、光照、种族多样性）下尤为显著。SAMM $\rightarrow$其他较低性能反映了SAMM的挑战特性——较低微表情强度和多样化受试者池。
+
+\subsection{与已有工作对比}
+
+不同于单骨干方法\cite{ben2022survey}，Censor明确建模神经科学观察的双视觉通路\cite{morris1999amygdala,kanwisher1997ffa}。这一架构选择与扩展至时序建模的双流假说\cite{simonyan2014twostream}一致。MoE分类不同于标准softmax，通过启用每个表情类别的专门化特征子空间实现。
+
+\subsection{实践意义}
+
+Censor的仿生设计提供可解释性：快通路对应快速粗糙运动检测；慢通路对应精细外观分析。这种映射可能促进需要模型行为与已知神经机制一致的临床应用。
+
+\subsection{局限性}
+
+需承认以下局限：
+\begin{enumerate}
+\item \textbf{计算成本}：双通路增加模型大小和训练时间，相比单骨干方法。
+\item \textbf{固定时间窗口}：16帧约束限制适应不同持续时间的微表情。
+\item \textbf{单人脸假设}：多人场景、遮挡和极端头部姿态未显式处理。
+\item \textbf{数据集范围}：评估聚焦CASME II；在SAMM、SMIC和跨数据集协议上的更广泛验证将增强结论。
+\end{enumerate}

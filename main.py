@@ -250,7 +250,11 @@ class Censor(nn.Module):
         # edges and suppress uniform regions. The onset-apex difference encodes
         # the micro-expression change directly -- far more informative than rPPG
         # for small datasets where rPPG estimation is unreliable.
-        if self.diff_mode:
+        if self.no_rppg:
+            # No rPPG: use zeros (rPPG signal disabled)
+            rppg_heatmap = torch.zeros_like(x_salient)
+            if self.verbose: print(f"[Censor] No rPPG: using zeros")
+        elif self.diff_mode:
             # Onset frame (first frame = neutral baseline)
             onset_frame = x_salient[:, :, 0:1, :, :]  # (B, C, 1, H, W)
             # Apex frame (middle frame = peak expression)
@@ -263,10 +267,6 @@ class Censor(nn.Module):
             # Use diff as the "change signal" instead of rPPG
             rppg_heatmap = onset_apex_diff
             if self.verbose: print(f"[Censor] Diff mode: onset-apex diff shape: {rppg_heatmap.shape}")
-        elif self.no_rppg:
-            # No rPPG: use zeros (rPPG signal disabled)
-            rppg_heatmap = torch.zeros_like(x_salient)
-            if self.verbose: print(f"[Censor] No rPPG: using zeros")
         else:
             # Original: rPPG blood-flow heatmap
             rppg_heatmap = self.rppg(x_salient)

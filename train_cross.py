@@ -249,6 +249,7 @@ class CrossDatasetTrainer:
             pretrained_backbone=getattr(args, 'pretrained_backbone', False),
             single_path=args.single_path,
             no_moe=args.no_moe,
+            no_amyg=getattr(args, 'no_amyg', False),
         ).to(self.device)
 
         # Determine num_classes based on phase
@@ -1792,6 +1793,8 @@ def parse_args():
                         help='Ablation: use single pathway only (fast or slow)')
     parser.add_argument('--no_moe', action='store_true',
                         help='Ablation: replace MoE head with simple linear layer')
+    parser.add_argument('--no_amyg', action='store_true',
+                        help='Ablation: disable amygdala attention gating')
 
     return parser.parse_args()
 

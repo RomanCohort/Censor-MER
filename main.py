@@ -78,7 +78,7 @@ class Censor(nn.Module):
     def __init__(self, fast_preprocess=False, diff_mode=False, verbose=True,
                  enable_sparse_control=False, return_features=False,
                  pretrained_backbone=False, single_path=None,
-                 no_moe=False):
+                 no_moe=False, no_amyg=False):
         super().__init__()
 
         self.fast_preprocess = fast_preprocess
@@ -92,6 +92,11 @@ class Censor(nn.Module):
         self.single_path = single_path  # None, 'fast', or 'slow'
         if single_path:
             print(f"[Censor] ABLATION: Single-path mode ({single_path})")
+
+        # No amygdala gating for ablation study
+        self.no_amyg = no_amyg
+        if no_amyg:
+            print("[Censor] ABLATION: No amygdala attention gating")
 
         # =====================================================================
         # Stage 1: Biomimetic Preprocessing
@@ -116,7 +121,10 @@ class Censor(nn.Module):
         # Stage 3: Fusiform-Amygdala Attention Circuit
         # =====================================================================
         print("[Censor] Initializing Attention Modulation...")
-        self.amygdala = Amygdala(AMYGDALA_CONFIG)
+        if not self.no_amyg:
+            self.amygdala = Amygdala(AMYGDALA_CONFIG)
+        else:
+            self.amygdala = None
         self.ffa = FFA(FFA_CONFIG)
         self.casa = CASANet(CASA_CONFIG)
 
@@ -331,7 +339,11 @@ class Censor(nn.Module):
 
         # Amygdala: generates Attention Prior Map from fast features
         # Input: (B, 512) -> Output: (B, 1, 14, 14)
-        apm = self.amygdala(fast_feat)
+        if self.amygdala is not None:
+            apm = self.amygdala(fast_feat)
+        else:
+            # No amygdala gating: use uniform attention map
+            apm = torch.ones(B, 1, 14, 14, device=x.device)
 
         # FFA: mutual channel recalibration between pathways
         # Inputs: (B, 512), (B, 768) -> Outputs: (B, 512), (B, 768)

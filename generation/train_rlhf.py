@@ -173,15 +173,23 @@ class RecognitionRewardModel(nn.Module):
         识别视频的情感类别
 
         Args:
-            video: (B, C, T, H, W)
+            video: (B, C, T, H, W) - 生成视频只有3通道
 
         Returns:
             logits: (B, num_classes)
         """
         # 如果是真实识别器，需要适配输入格式
-        if hasattr(self.recognizer, 'fast_pathway'):
-            # 完整Censor识别器
-            return self.recognizer(video)
+        if hasattr(self.recognizer, 'slow_pathway'):
+            # Slow pathway期望6通道（RGB + rPPG）
+            # rPPG需要计算，简化：用零填充
+            if video.shape[1] == 3:
+                # 添加3个零通道作为rPPG
+                rppg = torch.zeros_like(video)
+                video_6ch = torch.cat([video, rppg], dim=1)  # (B, 6, T, H, W)
+            else:
+                video_6ch = video
+
+            return self.recognizer(video_6ch)
         else:
             # 简化识别器
             return self.recognizer(video)

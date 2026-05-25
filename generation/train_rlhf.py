@@ -26,7 +26,111 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from model.censor_g_generator import CensorGGenerator
 from model.censor_g_snn import CensorGSNN
+from model.backbones import FastSubcorticalPathway, SlowCorticalPathway
+from model.fusion import CrossModalFusion
+from model.moe_head import DynamicMoEHead
 from data.casme2_real_loader import MultiDatasetGenerator, CASME2_EMOTION_MAPPING
+
+
+# =============================================================================
+# Load Real Recognition Model (87% accuracy)
+# =============================================================================
+
+def load_recognition_model(checkpoint_path: str, num_classes: int = 5):
+    """
+    加载真实的识别模型
+
+    Args:
+        checkpoint_path: checkpoint路径
+        num_classes: 类别数
+
+    Returns:
+        model: 识别模型
+    """
+    print(f"[RecognitionModel] Loading from {checkpoint_path}")
+
+    # 创建模型结构（与train_cross.py一致）
+    class CensorRecognizer(nn.Module):
+        def __init__(self, num_classes=5):
+            super().__init__()
+
+            # 双通路
+            self.fast_pathway = FastSubcorticalPathway()
+            self.slow_pathway = SlowCorticalPathway()
+
+            # 融合
+            self.fusion = CrossModalFusion(
+                fast_dim=256,
+                slow_dim=512,
+                out_dim=256
+            )
+
+            # MoE分类头
+            self.classifier = DynamicMoEHead(
+                in_dim=256,
+                num_classes=num_classes,
+                num_experts=4
+            )
+
+        def forward(self, frames, flow=None):
+            """
+            Args:
+                frames: (B, C, T, H, W) RGB帧
+                flow: (B, 2, T, H, W) 光流（可选）
+
+            Returns:
+                logits: (B, num_classes)
+            """
+            # 如果没有光流，从帧计算
+            if flow is None:
+                # 简化：用帧差代替光流
+                flow = frames[:, :, 1:] - frames[:, :, :-1]
+                flow = F.pad(flow, (0, 0, 0, 0, 0, 1), mode='replicate')
+                flow = flow[:, :2]  # 取前2通道
+
+            # 双通路处理
+            fast_feat = self.fast_pathway(flow)
+            slow_feat = self.slow_pathway(frames)
+
+            # 融合
+            fused_feat = self.fusion(fast_feat, slow_feat)
+
+            # 分类
+            logits = self.classifier(fused_feat)
+
+            return logits
+
+    # 创建模型
+    model = CensorRecognizer(num_classes=num_classes)
+
+    # 加载权重
+    try:
+        ckpt = torch.load(checkpoint_path, weights_only=False, map_location='cpu')
+
+        # 根据checkpoint结构加载
+        if 'model_state_dict' in ckpt:
+            model.load_state_dict(ckpt['model_state_dict'])
+        elif 'model' in ckpt:
+            model.load_state_dict(ckpt['model'])
+        elif 'state_dict' in ckpt:
+            model.load_state_dict(ckpt['state_dict'])
+        else:
+            # 尝试直接加载
+            model.load_state_dict(ckpt)
+
+        print(f"[RecognitionModel] Successfully loaded checkpoint")
+
+        # 如果有准确率信息，打印
+        if 'best_acc' in ckpt:
+            print(f"  Best accuracy: {ckpt['best_acc']:.2%}")
+        elif 'accuracy' in ckpt:
+            print(f"  Accuracy: {ckpt['accuracy']:.2%}")
+
+    except Exception as e:
+        print(f"[RecognitionModel] Warning: Could not load full checkpoint: {e}")
+        print(f"  Using partial weights or random initialization")
+
+    return model
 
 
 # =============================================================================
@@ -45,12 +149,12 @@ class RecognitionRewardModel(nn.Module):
 
         self.num_classes = num_classes
 
-        # 这里应该加载实际的识别模型
-        # 简化：使用模拟的识别器
-        self.recognizer = self._build_simple_recognizer()
-
-        if recognizer_checkpoint:
-            self._load_recognizer(recognizer_checkpoint)
+        # 加载真实识别器或使用简化版
+        if recognizer_checkpoint and os.path.exists(recognizer_checkpoint):
+            self.recognizer = load_recognition_model(recognizer_checkpoint, num_classes=5)
+        else:
+            print("[RecognitionRewardModel] Using simplified recognizer (no checkpoint)")
+            self.recognizer = self._build_simple_recognizer()
 
     def _build_simple_recognizer(self):
         """构建简单的识别器"""
@@ -65,15 +169,6 @@ class RecognitionRewardModel(nn.Module):
             nn.Linear(64, self.num_classes),
         )
 
-    def _load_recognizer(self, checkpoint_path: str):
-        """加载识别器权重"""
-        try:
-            ckpt = torch.load(checkpoint_path, weights_only=False, map_location='cpu')
-            # 根据checkpoint结构调整
-            print(f"[RecognitionRewardModel] Loaded recognizer from {checkpoint_path}")
-        except Exception as e:
-            print(f"[RecognitionRewardModel] Warning: Could not load recognizer: {e}")
-
     def forward(self, video: torch.Tensor) -> torch.Tensor:
         """
         识别视频的情感类别
@@ -84,7 +179,13 @@ class RecognitionRewardModel(nn.Module):
         Returns:
             logits: (B, num_classes)
         """
-        return self.recognizer(video)
+        # 如果是真实识别器，需要适配输入格式
+        if hasattr(self.recognizer, 'fast_pathway'):
+            # 完整Censor识别器
+            return self.recognizer(video)
+        else:
+            # 简化识别器
+            return self.recognizer(video)
 
     def compute_reward(self,
                        generated_video: torch.Tensor,

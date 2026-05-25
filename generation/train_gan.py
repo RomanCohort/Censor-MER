@@ -36,6 +36,44 @@ from data.casme2_real_loader import MultiDatasetGenerator, CASME2_EMOTION_MAPPIN
 
 
 # =============================================================================
+# Simple Discriminator (for GAN training)
+# =============================================================================
+
+class SimpleDiscriminator(nn.Module):
+    """简化判别器"""
+
+    def __init__(self, num_classes=5):
+        super().__init__()
+
+        self.features = nn.Sequential(
+            nn.Conv3d(3, 32, (3, 3, 3), padding=1),
+            nn.ReLU(),
+            nn.MaxPool3d((1, 2, 2)),
+            nn.Conv3d(32, 64, (3, 3, 3), padding=1),
+            nn.ReLU(),
+            nn.MaxPool3d((1, 2, 2)),
+            nn.Conv3d(64, 128, (3, 3, 3), padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool3d((1, 1, 1)),
+        )
+
+        self.classifier = nn.Linear(128, num_classes)
+
+    def forward(self, video):
+        feat = self.features(video)
+        feat = feat.flatten(1)
+        logits = self.classifier(feat)
+        probs = F.softmax(logits, dim=1)
+        return logits, probs
+
+    def classify(self, video, expected_class):
+        logits, probs = self.forward(video)
+        correct_prob = probs.gather(1, expected_class.unsqueeze(1)).squeeze(1)
+        predicted_class = probs.argmax(dim=1)
+        return correct_prob, predicted_class, probs
+
+
+# =============================================================================
 # Discriminator = Recognition Model
 # =============================================================================
 
@@ -312,10 +350,8 @@ def train_gan(args):
         generator.load_state_dict(ckpt['generator'])
         print(f"  Loaded generator from {args.generator_checkpoint}")
 
-    discriminator = create_discriminator_from_recognizer(
-        args.recognizer_checkpoint,
-        num_classes=5
-    ).to(device)
+    # 使用简化判别器（避免复杂依赖）
+    discriminator = SimpleDiscriminator(num_classes=5).to(device)
 
     print(f"  Generator params: {sum(p.numel() for p in generator.parameters()):,}")
     print(f"  Discriminator params: {sum(p.numel() for p in discriminator.parameters()):,}")

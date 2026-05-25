@@ -144,7 +144,8 @@ class ImprovedRPPGEstimator(nn.Module):
         frame_features = []
         for t in range(T):
             frame = video[:, :, t]  # (B, 3, H, W)
-            feat = self.spatial_encoder(frame)  # (B, 64)
+            feat = self.spatial_encoder(frame)  # (B, 64, 1, 1)
+            feat = feat.squeeze(-1).squeeze(-1)  # (B, 64)
             frame_features.append(feat)
 
         frame_features = torch.stack(frame_features, dim=2)  # (B, 64, T)

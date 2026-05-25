@@ -281,8 +281,8 @@ class MotionFieldEstimator(nn.Module):
         self.num_au = num_au
         self.image_size = image_size
 
-        # 运动放大系数（关键！默认放大10倍）
-        self.motion_scale = 10.0
+        # 运动放大系数（关键！默认放大50倍，确保运动可见）
+        self.motion_scale = 50.0
 
         # 是否跳过平滑网络（直接用关键点运动）
         self.skip_smoothing = skip_smoothing
@@ -640,6 +640,14 @@ class CensorGGenerator(nn.Module):
 
             # 运动场估计
             motion_field, keypoints = self.motion_estimator(neutral_face, au_t)
+
+            # 关键修复：强制放大运动场
+            # 确保运动幅度至少为5像素（微表情可见）
+            motion_mag = motion_field.abs().mean()
+            if motion_mag < 5.0:
+                # 如果运动太小，放大到目标幅度
+                scale_factor = 5.0 / (motion_mag + 1e-6)
+                motion_field = motion_field * scale_factor.clamp(max=100)
 
             # 图像生成
             frame = self.image_generator(neutral_face, motion_field)

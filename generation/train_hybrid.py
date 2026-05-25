@@ -330,8 +330,12 @@ def train_hybrid(args):
 
             # === 生成器训练 ===
             # 扩散生成（简化：用少量去噪步）
+            # neutral_face是单帧，需要扩展为视频
+            B, C, H, W = neutral_face.shape
+            neutral_video = neutral_face.unsqueeze(2).expand(B, C, args.num_frames, H, W)
+
             with torch.no_grad():
-                gen_video = diffusion.generate(neutral_face, blendshape, num_steps=5)
+                gen_video = diffusion.generate(neutral_video, blendshape, num_steps=5)
 
             # 精修
             refined = gen_video + hybrid_model.refiner(gen_video) * 0.1
@@ -407,8 +411,12 @@ def train_hybrid(args):
             diff_loss = F.mse_loss(noise_pred, noise)
 
             # === GAN损失 ===
+            # neutral_face是单帧，需要扩展为视频
+            B, C, H, W = neutral_face.shape
+            neutral_video = neutral_face.unsqueeze(2).expand(B, C, args.num_frames, H, W)
+
             with torch.no_grad():
-                gen_video = diffusion.generate(neutral_face, blendshape, num_steps=5)
+                gen_video = diffusion.generate(neutral_video, blendshape, num_steps=5)
             refined = gen_video + hybrid_model.refiner(gen_video) * 0.1
             correct_prob, _, _ = discriminator.classify(refined, expected_class)
             gan_loss = -torch.log(correct_prob + 1e-8).mean()

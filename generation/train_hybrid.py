@@ -59,7 +59,7 @@ class SimpleDiscriminator(nn.Module):
 
     def forward(self, video):
         feat = self.features(video)
-        feat = feat.squeeze()
+        feat = feat.flatten(1)  # 保持batch维度
         logits = self.classifier(feat)
         probs = F.softmax(logits, dim=1)
         return logits, probs

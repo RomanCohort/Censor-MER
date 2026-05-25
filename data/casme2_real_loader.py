@@ -587,8 +587,195 @@ class CASME2GeneratorDataset(Dataset):
         }
 
 
-if __name__ == '__main__':
-    demo_casme2_loader()
+# =============================================================================
+# Multi-Dataset Loader (CASME2 + SMIC + SAMM)
+# =============================================================================
+
+class MultiDatasetGenerator(Dataset):
+    """
+    多数据集生成数据集
+
+    支持CASME2、SMIC、SAMM三个数据集
+    """
+
+    def __init__(self, data_roots, image_size=224, num_frames=16, emotion_filter=None):
+        self.image_size = image_size
+        self.num_frames = num_frames
+        self.emotion_filter = emotion_filter or ['happiness', 'surprise', 'disgust', 'repression']
+
+        self.samples = []
+
+        # 加载每个数据集
+        for name, root in data_roots.items():
+            if root and os.path.exists(root):
+                samples = self._load_dataset(name, root)
+                self.samples.extend(samples)
+                print(f"[{name}] Loaded {len(samples)} samples from {root}")
+
+        print(f"[MultiDataset] Total samples: {len(self.samples)}")
+
+    def _load_dataset(self, name, root):
+        """加载单个数据集"""
+        samples = []
+
+        if name == 'CASME2':
+            # CASME2: cropped/subXX/videoXX/
+            cropped_dir = os.path.join(root, 'cropped')
+            if os.path.exists(cropped_dir):
+                for subject in os.listdir(cropped_dir)[:15]:
+                    subject_dir = os.path.join(cropped_dir, subject)
+                    if not os.path.isdir(subject_dir):
+                        continue
+                    for video in os.listdir(subject_dir)[:10]:
+                        video_dir = os.path.join(subject_dir, video)
+                        if not os.path.isdir(video_dir):
+                            continue
+                        frames = sorted([f for f in os.listdir(video_dir) if f.endswith('.jpg')])
+                        if len(frames) >= 8:
+                            emotion = self._infer_emotion_from_name(video)
+                            au = self._emotion_to_au(emotion)
+                            samples.append({
+                                'video_dir': video_dir,
+                                'frames': frames,
+                                'emotion': emotion,
+                                'au': au,
+                                'dataset': 'CASME2',
+                                'subject': subject,
+                                'video': video,
+                            })
+
+        elif name == 'SMIC':
+            # SMIC: HS/, NIR/, VIS/
+            for condition in ['HS', 'NIR', 'VIS']:
+                cond_dir = os.path.join(root, condition)
+                if not os.path.exists(cond_dir):
+                    continue
+                for subject in os.listdir(cond_dir)[:10]:
+                    subject_dir = os.path.join(cond_dir, subject)
+                    if not os.path.isdir(subject_dir):
+                        continue
+                    for video in os.listdir(subject_dir)[:10]:
+                        video_dir = os.path.join(subject_dir, video)
+                        if not os.path.isdir(video_dir):
+                            continue
+                        frames = sorted([f for f in os.listdir(video_dir) if f.endswith('.jpg') or f.endswith('.png')])
+                        if len(frames) >= 8:
+                            emotion = self._infer_emotion_from_name(video)
+                            au = self._emotion_to_au(emotion)
+                            samples.append({
+                                'video_dir': video_dir,
+                                'frames': frames,
+                                'emotion': emotion,
+                                'au': au,
+                                'dataset': 'SMIC',
+                                'condition': condition,
+                                'subject': subject,
+                                'video': video,
+                            })
+
+        elif name == 'SAMM':
+            # SAMM: SAMM/subXX/videoXX/
+            samm_dir = os.path.join(root, 'SAMM')
+            if os.path.exists(samm_dir):
+                for subject in os.listdir(samm_dir)[:15]:
+                    subject_dir = os.path.join(samm_dir, subject)
+                    if not os.path.isdir(subject_dir):
+                        continue
+                    for video in os.listdir(subject_dir)[:10]:
+                        video_dir = os.path.join(subject_dir, video)
+                        if not os.path.isdir(video_dir):
+                            continue
+                        frames = sorted([f for f in os.listdir(video_dir) if f.endswith('.jpg') or f.endswith('.png')])
+                        if len(frames) >= 8:
+                            emotion = self._infer_emotion_from_name(video)
+                            au = self._emotion_to_au(emotion)
+                            samples.append({
+                                'video_dir': video_dir,
+                                'frames': frames,
+                                'emotion': emotion,
+                                'au': au,
+                                'dataset': 'SAMM',
+                                'subject': subject,
+                                'video': video,
+                            })
+
+        return samples
+
+    def _infer_emotion_from_name(self, name):
+        """从视频名推断情感"""
+        name_lower = name.lower()
+        if 'happy' in name_lower or 'hap' in name_lower or 'joy' in name_lower:
+            return 'happiness'
+        elif 'surprise' in name_lower or 'sur' in name_lower or 'shock' in name_lower:
+            return 'surprise'
+        elif 'disgust' in name_lower or 'dis' in name_lower:
+            return 'disgust'
+        elif 'repress' in name_lower or 'suppressed' in name_lower or 'sad' in name_lower:
+            return 'repression'
+        else:
+            return self.emotion_filter[np.random.randint(0, len(self.emotion_filter))]
+
+    def _emotion_to_au(self, emotion):
+        """情感到AU映射"""
+        au = torch.zeros(17)
+
+        if emotion == 'happiness':
+            au[AU_INDEX['AU6']] = 0.7
+            au[AU_INDEX['AU12']] = 0.8
+            au[AU_INDEX['AU25']] = 0.3
+        elif emotion == 'surprise':
+            au[AU_INDEX['AU1']] = 0.6
+            au[AU_INDEX['AU2']] = 0.6
+            au[AU_INDEX['AU5']] = 0.7
+            au[AU_INDEX['AU25']] = 0.5
+        elif emotion == 'disgust':
+            au[AU_INDEX['AU4']] = 0.5
+            au[AU_INDEX['AU9']] = 0.6
+            au[AU_INDEX['AU10']] = 0.4
+            au[AU_INDEX['AU17']] = 0.3
+        elif emotion == 'repression':
+            au[AU_INDEX['AU14']] = 0.5
+            au[AU_INDEX['AU17']] = 0.4
+            au[AU_INDEX['AU4']] = 0.3
+
+        return au
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
+
+        # 加载帧
+        frames = []
+        for i, frame_file in enumerate(sample['frames'][:self.num_frames]):
+            frame_path = os.path.join(sample['video_dir'], frame_file)
+            frame = cv2.imread(frame_path)
+            if frame is None:
+                frame = np.zeros((self.image_size, self.image_size, 3), dtype=np.uint8)
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame = cv2.resize(frame, (self.image_size, self.image_size))
+            frame = torch.from_numpy(frame).float().permute(2, 0, 1) / 255.0
+            frames.append(frame)
+
+        # 填充到num_frames
+        while len(frames) < self.num_frames:
+            frames.append(frames[-1].clone())
+
+        neutral_face = frames[0]
+        target_video = torch.stack(frames, dim=1)
+
+        return {
+            'neutral_face': neutral_face,
+            'target_video': target_video,
+            'au_activation': sample['au'],
+            'emotion_class': CASME2_EMOTION_MAPPING.get(sample['emotion'], 0),
+            'emotion_name': sample['emotion'],
+            'intensity': sample['au'].max().item(),
+            'subject': sample['subject'],
+            'video': sample['video'],
+            'dataset': sample['dataset'],
+        }
 
 
 if __name__ == '__main__':

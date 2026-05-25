@@ -26,7 +26,7 @@ from datetime import datetime
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from model.censor_g_generator import CensorGGenerator, FOMMBaseline, VideoDiscriminator
-from data.casme2_real_loader import CASME2RealDataset, CASME2GeneratorDataset
+from data.casme2_real_loader import CASME2RealDataset, CASME2GeneratorDataset, MultiDatasetGenerator
 
 
 def compute_fid(fake_features, real_features):
@@ -89,7 +89,20 @@ def train_generator(args):
 
     # 创建数据集
     print("\n[1] Creating dataset...")
-    if args.data_root and os.path.exists(args.data_root):
+
+    # 多数据集模式
+    if args.multi_dataset:
+        data_roots = {
+            'CASME2': args.casme2_root,
+            'SMIC': args.smic_root,
+            'SAMM': args.samm_root,
+        }
+        dataset = MultiDatasetGenerator(
+            data_roots=data_roots,
+            image_size=args.image_size,
+            num_frames=args.num_frames,
+        )
+    elif args.data_root and os.path.exists(args.data_root):
         dataset = CASME2RealDataset(
             data_root=args.data_root,
             image_size=args.image_size,
@@ -313,9 +326,19 @@ def main():
 
     # 数据参数
     parser.add_argument('--data_root', type=str, default=None,
-                        help='CASME2 data root directory')
+                        help='Single dataset root directory')
     parser.add_argument('--num_samples', type=int, default=100,
                         help='Number of simulated samples (if no real data)')
+
+    # 多数据集模式
+    parser.add_argument('--multi_dataset', action='store_true',
+                        help='Use multiple datasets (CASME2+SMIC+SAMM)')
+    parser.add_argument('--casme2_root', type=str, default='/root/autodl-tmp/data/CASME2',
+                        help='CASME2 data root')
+    parser.add_argument('--smic_root', type=str, default='/root/SMIC_all_cropped',
+                        help='SMIC data root')
+    parser.add_argument('--samm_root', type=str, default='/root/data/SAMM',
+                        help='SAMM data root')
 
     # 模型参数
     parser.add_argument('--num_frames', type=int, default=16)

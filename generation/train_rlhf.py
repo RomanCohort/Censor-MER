@@ -327,51 +327,30 @@ class PPOTrainer:
         advantage = reward - value
         advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
 
-        # === Step 5: PPO更新 ===
-        # 计算旧策略的log prob
-        old_log_prob = self.compute_log_prob(au_activation)
+        # === Step 5: 简化Policy Gradient更新 ===
+        # 直接优化奖励，不使用完整PPO
+        self.optimizer.zero_grad()
 
-        # 多次更新（PPO的特性）
-        total_loss = 0
+        # 重新生成（确保梯度追踪）
+        generated_video, motion_fields = self.generator(neutral_face, au_activation)
 
-        for _ in range(3):  # PPO通常进行多次小更新
-            # 重新生成（或使用缓存的）
-            generated_video, _ = self.generator(neutral_face, au_activation)
+        # 计算奖励（作为目标）
+        reward = self.reward_model.compute_reward(generated_video, expected_class)
 
-            # 计算新奖励
-            new_reward = self.reward_model.compute_reward(generated_video, expected_class)
+        # 简化损失：最大化奖励 = 最小化负奖励
+        loss = -reward.mean()
 
-            # 计算新log prob
-            new_log_prob = self.compute_log_prob(au_activation)
+        # 反向传播
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.generator.parameters(), 1.0)
+        self.optimizer.step()
 
-            # PPO ratio
-            ratio = torch.exp(new_log_prob - old_log_prob.detach())
-
-            # PPO损失
-            surr1 = ratio * advantage.detach()
-            surr2 = torch.clamp(ratio, 1 - self.clip_ratio, 1 + self.clip_ratio) * advantage.detach()
-            policy_loss = -torch.min(surr1, surr2).mean()
-
-            # 熵奖励（鼓励探索）
-            entropy = -new_log_prob.mean()
-            entropy_loss = -self.entropy_coef * entropy
-
-            # 总损失
-            loss = policy_loss + entropy_loss
-
-            self.optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.generator.parameters(), 1.0)
-            self.optimizer.step()
-
-            total_loss += loss.item()
+        total_loss = loss.item()
 
         # 返回指标
         return {
-            'loss': total_loss / 3,
+            'loss': total_loss,
             'reward': reward.mean().item(),
-            'advantage': advantage.mean().item(),
-            'entropy': entropy.item(),
         }
 
     def train_epoch(self, dataloader: DataLoader, epoch: int) -> dict:
@@ -387,8 +366,6 @@ class PPOTrainer:
             'epoch': epoch,
             'loss': np.mean([m['loss'] for m in metrics_list]),
             'reward': np.mean([m['reward'] for m in metrics_list]),
-            'advantage': np.mean([m['advantage'] for m in metrics_list]),
-            'entropy': np.mean([m['entropy'] for m in metrics_list]),
         }
 
         return avg_metrics
@@ -487,8 +464,6 @@ def train_rlhf(args):
         print(f"\n  Epoch {epoch} Summary:")
         print(f"    Loss: {metrics['loss']:.4f}")
         print(f"    Reward: {metrics['reward']:.4f}")
-        print(f"    Advantage: {metrics['advantage']:.4f}")
-        print(f"    Entropy: {metrics['entropy']:.4f}")
 
         trainer.training_log['epochs'].append(metrics)
 

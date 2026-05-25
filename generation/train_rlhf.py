@@ -89,7 +89,13 @@ def load_recognition_model(checkpoint_path: str, num_classes: int = 5):
 
             # 双通路处理
             fast_feat = self.fast_pathway(flow)
-            slow_feat = self.slow_pathway(frames)
+
+            # Slow pathway返回(pooled, spatial_map)，取第一个
+            slow_out = self.slow_pathway(frames)
+            if isinstance(slow_out, tuple):
+                slow_feat = slow_out[0]  # pooled features
+            else:
+                slow_feat = slow_out
 
             # 融合
             fused_feat = self.fusion(fast_feat, slow_feat)

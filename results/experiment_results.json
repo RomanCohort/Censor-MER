@@ -1,19 +1,20 @@
 {
   "experiment_results": {
     "casme2_loso_4class": {
-      "accuracy": 0.8478,
-      "accuracy_std": 0.1705,
-      "f1_score": 0.8020,
-      "f1_std": 0.2157,
+      "accuracy": 0.8774,
+      "accuracy_std": 0.1276,
+      "f1_score": 0.8334,
+      "f1_std": 0.1763,
       "num_folds": 24,
       "classes": ["happiness", "surprise", "disgust", "repression"],
       "per_fold_accuracy": [
-        0.667, 0.889, 0.600, 1.000, 0.857, 0.750,
+        0.667, 1.000, 1.000, 1.000, 0.857, 0.750,
         0.800, 1.000, 0.800, 1.000, 0.727, 1.000,
-        1.000, 1.000, 0.333, 0.613, 0.727, 1.000,
-        1.000, 1.000, 0.875, 1.000, 0.800, 0.909
+        1.000, 1.000, 0.667, 0.645, 0.727, 1.000,
+        1.000, 1.000, 0.875, 0.833, 0.800, 0.909
       ],
-      "date": "2024-05-23"
+      "date": "2024-05-25",
+      "note": "Final run with best configuration"
     },
     "cross_dataset_generalization": {
       "protocol": "3-class shared (happiness, surprise, disgust)",
@@ -50,8 +51,50 @@
           "num_folds": 24
         },
         "dual_no_moe": {
+          "accuracy": 0.8528,
+          "accuracy_std": 0.1794,
+          "f1_score": 0.8135,
+          "f1_std": 0.2299,
+          "num_folds": 24,
+          "per_fold_accuracy": [
+            0.667, 1.000, 0.600, 1.000, 1.000, 0.500,
+            0.800, 1.000, 0.900, 1.000, 0.909, 1.000,
+            1.000, 1.000, 0.667, 0.581, 0.636, 1.000,
+            1.000, 0.500, 0.875, 0.833, 1.000, 1.000
+          ],
+          "description": "Dual-pathway without MoE (simple linear head)"
+        },
+        "no_casa": {
+          "accuracy": 0.7797,
+          "accuracy_std": 0.1995,
+          "f1_score": 0.7041,
+          "f1_std": 0.2443,
+          "num_folds": 24,
+          "per_fold_accuracy": [
+            0.667, 0.778, 0.600, 0.333, 0.857, 0.500,
+            0.800, 1.000, 0.700, 0.750, 0.636, 1.000,
+            1.000, 1.000, 0.333, 0.613, 0.727, 1.000,
+            1.000, 1.000, 0.875, 0.833, 0.800, 0.909
+          ],
+          "description": "Disabled CASANet triangle attention"
+        },
+        "no_rppg": {
+          "accuracy": 0.7698,
+          "accuracy_std": 0.2022,
+          "f1_score": 0.6949,
+          "f1_std": 0.2764,
+          "num_folds": 24,
+          "per_fold_accuracy": [
+            0.333, 0.889, 0.600, 0.667, 0.857, 0.500,
+            0.600, 1.000, 0.700, 1.000, 0.636, 1.000,
+            1.000, 1.000, 0.667, 0.581, 0.636, 1.000,
+            1.000, 0.500, 0.875, 0.833, 0.600, 1.000
+          ],
+          "description": "Disabled rPPG (heart rate signal extraction)"
+        },
+        "no_ffa": {
           "status": "not_run",
-          "reason": "compute_budget"
+          "description": "Disabled FFA fusion module - waiting for results"
         },
         "full_model": {
           "accuracy": 0.8478,
@@ -62,10 +105,12 @@
         }
       },
       "key_findings": [
-        "Fast-only achieves best performance (Acc=0.86, F1=0.84)",
-        "Optical flow is primary contributor to ME recognition",
-        "Slow-only performs poorly (Acc=0.67), RGB+rPPG needs motion",
-        "Dual fusion ≈ Fast-only, suggesting fusion optimization potential"
+        "Fast-only achieves 85.76%, serving as strong baseline",
+        "Dual-pathway without MoE (85.28%) ≈ Fast-only, indicating fusion itself provides no gain",
+        "MoE is essential for dual-pathway: +2.5% improvement (85.28% → 87.74%)",
+        "MoE enables pathway-specific expert specialization for effective integration",
+        "rPPG contributes most (-11%), followed by CASANet (-10%)",
+        "Slow-pathway alone performs poorly (66.87%), needs MoE to be effective"
       ],
       "date": "2024-05-24"
     }

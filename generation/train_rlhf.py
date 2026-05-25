@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from model.censor_g_generator import CensorGGenerator
 from model.censor_g_snn import CensorGSNN
 from model.backbones import FastSubcorticalPathway, SlowCorticalPathway
-from model.fusion import CrossModalFusion
+from model.fusion import TSFmicroFusion
 from model.moe_head import DynamicMoEHead
 from data.casme2_real_loader import MultiDatasetGenerator, CASME2_EMOTION_MAPPING
 
@@ -59,7 +59,7 @@ def load_recognition_model(checkpoint_path: str, num_classes: int = 5):
             self.slow_pathway = SlowCorticalPathway()
 
             # 融合
-            self.fusion = CrossModalFusion(
+            self.fusion = TSFmicroFusion(
                 fast_dim=256,
                 slow_dim=512,
                 out_dim=256

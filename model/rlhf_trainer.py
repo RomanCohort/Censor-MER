@@ -614,5 +614,380 @@ def demo_rlhf():
     print("="*60)
 
 
+# =============================================================================
+# Part 6: 专家反馈 vs 普通用户反馈
+# =============================================================================
+
+class ExpertFeedbackCollector:
+    """
+    专家反馈收集器
+
+    针对微表情领域的特殊需求：
+      1. 专业评估人员（心理学背景）
+      2. FACS编码专家
+      3. 微表情识别训练有素的人员
+
+    评估维度：
+      - AU准确性：生成的AU是否正确
+      - 时间特性：onset/apex/offset是否合理
+      - 微表情特征：是否符合微表情定义
+    """
+
+    def __init__(self):
+        self.expert_feedback = []
+
+    def collect_expert_rating(self,
+                               video_path: str,
+                               prompt: str,
+                               expected_au: Dict = None) -> Dict:
+        """
+        收集专家级评估
+
+        Args:
+            video_path: 视频路径
+            prompt: 提示词
+            expected_au: 期望的AU激活（用于验证）
+
+        Returns:
+            expert_scores: 专家评分
+        """
+        print(f"\n[ExpertFeedbackCollector] Expert Evaluation")
+        print(f"  Video: {video_path}")
+        print(f"  Prompt: {prompt}")
+
+        # 专家评估维度
+        scores = {
+            # 1. 微表情特性评分 (1-5)
+            'micro_expression_quality': 0.0,  # 是否符合微表情定义
+            'duration_appropriate': 0.0,       # 持续时间是否合理
+            'intensity_appropriate': 0.0,     # 强度是否适中
+
+            # 2. AU准确性 (1-5)
+            'au_accuracy': 0.0,               # AU激活是否正确
+            'au_temporal': 0.0,               # AU时间变化是否合理
+
+            # 3. 自然度 (1-5)
+            'naturalness': 0.0,               # 表情是否自然
+            'smoothness': 0.0,                # 运动是否流畅
+
+            # 4. 与提示词匹配 (1-5)
+            'prompt_match': 0.0,              # 是否符合提示词
+
+            # 5. 总体评分
+            'overall': 0.0,
+
+            # 6. 专家评语
+            'comments': '',
+        }
+
+        # 模拟专家评分（实际需要真实专家填写）
+        # 这里用模拟数据
+        scores['micro_expression_quality'] = 3.5
+        scores['duration_appropriate'] = 4.0
+        scores['intensity_appropriate'] = 3.8
+        scores['au_accuracy'] = 3.2
+        scores['au_temporal'] = 3.5
+        scores['naturalness'] = 4.0
+        scores['smoothness'] = 4.2
+        scores['prompt_match'] = 3.8
+        scores['overall'] = sum([
+            scores['micro_expression_quality'],
+            scores['au_accuracy'],
+            scores['naturalness'],
+            scores['prompt_match'],
+        ]) / 4
+        scores['comments'] = "Good micro-expression quality, AU activation could be more precise"
+
+        return scores
+
+
+class AutomaticEvaluator:
+    """
+    自动评估器（替代人类专家）
+
+    使用预训练模型自动评估生成质量：
+      1. 微表情识别器 → 判断生成的视频是否被正确识别
+      2. AU检测器 → 检测生成的AU是否正确
+      3. 时间分析器 → 分析onset/apex/offset
+      4. FID/LPIPS → 图像质量评估
+    """
+
+    def __init__(self, recognizer_checkpoint: str = None):
+        """
+        Args:
+            recognizer_checkpoint: 微表情识别器checkpoint
+        """
+        # 这里可以加载预训练的识别器
+        # 用于自动评估生成质量
+        self.recognizer = None
+
+    def evaluate_micro_expression_quality(self, video: torch.Tensor) -> float:
+        """
+        评估微表情质量
+
+        使用识别器判断生成视频的类别置信度
+        """
+        # 如果有预训练识别器
+        if self.recognizer is not None:
+            with torch.no_grad():
+                logits = self.recognizer(video)
+                confidence = F.softmax(logits, dim=1).max().item()
+                return confidence
+
+        # 否则返回模拟分数
+        return 0.7
+
+    def evaluate_au_accuracy(self,
+                             generated_video: torch.Tensor,
+                             expected_au: torch.Tensor) -> float:
+        """
+        评估AU准确性
+
+        使用AU检测器检测生成视频的AU
+        与期望的AU对比
+        """
+        # 模拟AU检测
+        # 实际需要用预训练的AU检测器
+        detected_au = torch.rand_like(expected_au) * 0.5 + expected_au * 0.5
+
+        # 计算相关性
+        correlation = F.cosine_similarity(
+            detected_au.unsqueeze(0),
+            expected_au.unsqueeze(0)
+        ).item()
+
+        return max(0, correlation)
+
+    def evaluate_temporal_characteristics(self, video: torch.Tensor) -> Dict:
+        """
+        评估时间特性
+
+        分析：
+          - onset时长
+          - apex时长
+          - offset时长
+          - 是否符合微表情定义
+        """
+        T = video.shape[2]
+
+        # 计算帧间运动
+        frame_motion = []
+        for t in range(T - 1):
+            motion = (video[:, :, t+1] - video[:, :, t]).abs().mean().item()
+            frame_motion.append(motion)
+
+        # 找到apex（运动最大的帧）
+        apex_frame = np.argmax(frame_motion)
+        max_motion = max(frame_motion)
+
+        # 判断时间特性
+        # 微表情：onset < 0.5秒，apex < 0.2秒，offset < 0.5秒
+        onset_frames = apex_frame
+        apex_frames = 1  # 简化
+        offset_frames = T - apex_frame - 1
+
+        # 微表情定义：总时长 < 0.5秒（假设30fps）
+        total_duration = T / 30.0
+        is_micro = total_duration < 0.5
+
+        return {
+            'onset_frames': onset_frames,
+            'apex_frame': apex_frame,
+            'offset_frames': offset_frames,
+            'total_duration': total_duration,
+            'is_micro_expression': is_micro,
+            'max_motion': max_motion,
+        }
+
+    def comprehensive_evaluate(self,
+                               generated_video: torch.Tensor,
+                               expected_au: torch.Tensor = None,
+                               prompt: str = None) -> Dict:
+        """
+        综合评估
+
+        Returns:
+            evaluation: 综合评估结果
+        """
+        # 1. 微表情质量
+        me_quality = self.evaluate_micro_expression_quality(generated_video)
+
+        # 2. AU准确性
+        au_accuracy = 0.5
+        if expected_au is not None:
+            au_accuracy = self.evaluate_au_accuracy(generated_video, expected_au)
+
+        # 3. 时间特性
+        temporal = self.evaluate_temporal_characteristics(generated_video)
+
+        # 4. 综合评分
+        overall = (me_quality + au_accuracy) / 2
+
+        return {
+            'micro_expression_quality': me_quality,
+            'au_accuracy': au_accuracy,
+            'temporal': temporal,
+            'overall': overall,
+        }
+
+
+# =============================================================================
+# Part 7: 混合反馈策略
+# =============================================================================
+
+class HybridFeedbackStrategy:
+    """
+    混合反馈策略
+
+    结合：
+      1. 自动评估器（快速、低成本）
+      2. 专家反馈（高质量、高成本）
+      3. 普通用户反馈（多样性、中等成本）
+    """
+
+    def __init__(self):
+        self.auto_evaluator = AutomaticEvaluator()
+        self.expert_collector = ExpertFeedbackCollector()
+
+    def get_feedback_weights(self, sample_type: str = 'random') -> Dict:
+        """
+        获取不同反馈源的权重
+
+        Args:
+            sample_type: 样本类型
+
+        Returns:
+            weights: 各反馈源的权重
+        """
+        if sample_type == 'random':
+            # 随机抽样：主要用自动评估
+            return {
+                'automatic': 0.7,
+                'expert': 0.1,
+                'user': 0.2,
+            }
+        elif sample_type == 'difficult':
+            # 困难样本：需要更多专家反馈
+            return {
+                'automatic': 0.3,
+                'expert': 0.5,
+                'user': 0.2,
+            }
+        elif sample_type == 'validation':
+            # 验证样本：需要专家确认
+            return {
+                'automatic': 0.2,
+                'expert': 0.7,
+                'user': 0.1,
+            }
+        else:
+            return {
+                'automatic': 0.5,
+                'expert': 0.3,
+                'user': 0.2,
+            }
+
+    def collect_hybrid_feedback(self,
+                                video: torch.Tensor,
+                                expected_au: torch.Tensor = None,
+                                sample_type: str = 'random') -> Dict:
+        """
+        收集混合反馈
+
+        Args:
+            video: 生成的视频
+            expected_au: 期望的AU
+            sample_type: 样本类型
+
+        Returns:
+            feedback: 综合反馈
+        """
+        weights = self.get_feedback_weights(sample_type)
+
+        # 1. 自动评估
+        auto_eval = self.auto_evaluator.comprehensive_evaluate(video, expected_au)
+
+        # 2. 专家反馈（模拟）
+        expert_scores = {
+            'overall': 0.7,  # 模拟
+        }
+
+        # 3. 用户反馈（模拟）
+        user_scores = {
+            'overall': 0.75,  # 模拟
+        }
+
+        # 4. 加权综合
+        overall = (
+            weights['automatic'] * auto_eval['overall'] +
+            weights['expert'] * expert_scores['overall'] +
+            weights['user'] * user_scores['overall']
+        )
+
+        return {
+            'automatic_evaluation': auto_eval,
+            'expert_scores': expert_scores,
+            'user_scores': user_scores,
+            'weights': weights,
+            'overall_reward': overall,
+        }
+
+
+# =============================================================================
+# Part 8: Demo with Expert Feedback
+# =============================================================================
+
+def demo_expert_feedback():
+    """演示专家反馈流程"""
+    print("\n" + "="*60)
+    print("Expert Feedback for Micro-Expression Generation")
+    print("="*60)
+
+    # 创建评估器
+    auto_evaluator = AutomaticEvaluator()
+    expert_collector = ExpertFeedbackCollector()
+    hybrid_strategy = HybridFeedbackStrategy()
+
+    # 模拟生成视频
+    video = torch.randn(1, 3, 16, 224, 224) * 0.1 + 0.5
+    expected_au = torch.zeros(17)
+    expected_au[8] = 0.8  # AU12
+
+    # 1. 自动评估
+    print("\n[1] Automatic Evaluation")
+    auto_eval = auto_evaluator.comprehensive_evaluate(video, expected_au)
+    print(f"  Micro-expression quality: {auto_eval['micro_expression_quality']:.4f}")
+    print(f"  AU accuracy: {auto_eval['au_accuracy']:.4f}")
+    print(f"  Is micro-expression: {auto_eval['temporal']['is_micro_expression']}")
+
+    # 2. 专家评估
+    print("\n[2] Expert Evaluation")
+    expert_scores = expert_collector.collect_expert_rating(
+        video_path='demo_video.mp4',
+        prompt='微笑',
+        expected_au={'AU12': 0.8}
+    )
+    print(f"  AU accuracy: {expert_scores['au_accuracy']:.2f}")
+    print(f"  Naturalness: {expert_scores['naturalness']:.2f}")
+    print(f"  Overall: {expert_scores['overall']:.2f}")
+    print(f"  Comments: {expert_scores['comments']}")
+
+    # 3. 混合策略
+    print("\n[3] Hybrid Feedback Strategy")
+    hybrid_feedback = hybrid_strategy.collect_hybrid_feedback(
+        video=video,
+        expected_au=expected_au,
+        sample_type='random'
+    )
+    print(f"  Weights: {hybrid_feedback['weights']}")
+    print(f"  Overall reward: {hybrid_feedback['overall_reward']:.4f}")
+
+    print("\n" + "="*60)
+    print("Demo Complete!")
+    print("="*60)
+
+
 if __name__ == '__main__':
+    # 可以选择运行不同的demo
     demo_rlhf()
+    # demo_expert_feedback()

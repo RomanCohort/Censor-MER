@@ -206,10 +206,20 @@ class CASME2RealDataset(Dataset):
     def _create_mock_annotations(self, data_root):
         """创建模拟标注（当无真实标注时）"""
         annotations = []
-        images_dir = os.path.join(data_root, 'images')
 
-        if not os.path.exists(images_dir):
-            print(f"[Warning] Images directory not found: {images_dir}")
+        # 尝试多种可能的目录名
+        possible_dirs = ['images', 'cropped', 'raw']
+        images_dir = None
+
+        for dir_name in possible_dirs:
+            candidate = os.path.join(data_root, dir_name)
+            if os.path.exists(candidate):
+                images_dir = candidate
+                print(f"[Info] Found data directory: {images_dir}")
+                break
+
+        if images_dir is None:
+            print(f"[Warning] No data directory found in {data_root}")
             return None
 
         # 遍历subject/video结构
@@ -219,7 +229,7 @@ class CASME2RealDataset(Dataset):
                 continue
 
             for video in os.listdir(subject_dir)[:5]:  # 每个subject限制5个video
-                video_dir = os.path.join(subject_dir, video)
+                video_dir = os.path.join(images_dir, subject, video)
                 if not os.path.isdir(video_dir):
                     continue
 

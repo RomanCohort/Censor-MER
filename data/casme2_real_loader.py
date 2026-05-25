@@ -508,5 +508,78 @@ def demo_casme2_loader():
     print("\n[Demo Complete]")
 
 
+# =============================================================================
+# Generator Dataset (Simulated for testing when no real data available)
+# =============================================================================
+
+class CASME2GeneratorDataset(Dataset):
+    """
+    模拟CASME2生成数据集（当真实数据不存在时使用）
+
+    用于测试生成网络：
+      - neutral_face: 模拟中性脸（随机噪声）
+      - target_video: 模拟目标视频（随机噪声）
+      - au_activation: 模拟AU激活
+    """
+
+    def __init__(self, data_root=None, num_samples=100, image_size=224, num_frames=16):
+        self.num_samples = num_samples
+        self.image_size = image_size
+        self.num_frames = num_frames
+
+        # 情感类别
+        self.emotions = ['happiness', 'surprise', 'disgust', 'repression']
+
+        print(f"[CASME2GeneratorDataset] Creating {num_samples} simulated samples")
+        print(f"  Image size: {image_size}")
+        print(f"  Num frames: {num_frames}")
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, idx):
+        # 模拟中性脸
+        neutral_face = torch.randn(3, self.image_size, self.image_size) * 0.3 + 0.5
+        neutral_face = torch.clamp(neutral_face, 0, 1)
+
+        # 模拟目标视频
+        target_video = torch.randn(3, self.num_frames, self.image_size, self.image_size) * 0.3 + 0.5
+        target_video = torch.clamp(target_video, 0, 1)
+
+        # 模拟AU激活
+        emotion_idx = idx % 4
+        au_activation = torch.zeros(17)
+
+        if emotion_idx == 0:  # happiness
+            au_activation[AU_INDEX['AU6']] = 0.7
+            au_activation[AU_INDEX['AU12']] = 0.8
+        elif emotion_idx == 1:  # surprise
+            au_activation[AU_INDEX['AU1']] = 0.6
+            au_activation[AU_INDEX['AU2']] = 0.6
+            au_activation[AU_INDEX['AU5']] = 0.7
+        elif emotion_idx == 2:  # disgust
+            au_activation[AU_INDEX['AU4']] = 0.5
+            au_activation[AU_INDEX['AU9']] = 0.6
+            au_activation[AU_INDEX['AU10']] = 0.4
+        else:  # repression
+            au_activation[AU_INDEX['AU14']] = 0.5
+            au_activation[AU_INDEX['AU17']] = 0.4
+
+        return {
+            'neutral_face': neutral_face,
+            'target_video': target_video,
+            'au_activation': au_activation,
+            'emotion_class': emotion_idx,
+            'emotion_name': self.emotions[emotion_idx],
+            'intensity': au_activation.max().item(),
+            'subject': f'sim_{idx}',
+            'video': f'video_{idx}',
+        }
+
+
+if __name__ == '__main__':
+    demo_casme2_loader()
+
+
 if __name__ == '__main__':
     demo_casme2_loader()

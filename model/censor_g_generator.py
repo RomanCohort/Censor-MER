@@ -281,6 +281,9 @@ class MotionFieldEstimator(nn.Module):
         self.num_au = num_au
         self.image_size = image_size
 
+        # 运动放大系数（关键！默认放大10倍）
+        self.motion_scale = 10.0
+
         # 关键点检测器
         self.keypoint_detector = KeypointDetector(num_keypoints, image_size)
 
@@ -307,11 +310,12 @@ class MotionFieldEstimator(nn.Module):
         weights = torch.zeros(self.num_au, self.num_keypoints, 2)
 
         # 基于AU_KEYPOINT_MAPPING初始化
+        # 重要：乘以motion_scale放大运动
         for au_name, mapping in AU_KEYPOINT_MAPPING.items():
             au_idx = AU_INDEX[au_name]
             kp_indices = mapping['keypoints']
             direction = mapping['direction']
-            scale = mapping['scale']
+            scale = mapping['scale'] * self.motion_scale  # ← 放大！
 
             for kp_idx in kp_indices:
                 if kp_idx < self.num_keypoints:
@@ -395,8 +399,8 @@ class MotionFieldEstimator(nn.Module):
         # 计算位移
         displacement = target_kp - source_kp  # (B, N, 2)
 
-        # 计算每个关键点的影响范围
-        sigma = 20.0  # 影响范围
+        # 增加sigma扩大影响范围（从20到40）
+        sigma = 40.0  # 影响范围
 
         motion_field_x = torch.zeros(B, H, W, device=source_kp.device)
         motion_field_y = torch.zeros(B, H, W, device=source_kp.device)

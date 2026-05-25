@@ -266,11 +266,11 @@ def train_hybrid(args):
             au_activation = batch['au_activation'].to(device)
 
             # AU → Blendshape
-            blendshape = hybrid_model.blendshape_system.au_to_blendshape(au_activation)
+            blendshape = hybrid_model.blendshape_system.au_to_blendshape(au_activation).to(device).to(device)
 
             # 扩散训练步
             B = target_video.shape[0]
-            t = torch.randint(0, diffusion.num_timesteps, (B,))
+            t = torch.randint(0, diffusion.num_timesteps, (B,), device=device)
 
             # 前向扩散
             xt, noise = diffusion.forward_diffusion(target_video, t)
@@ -326,7 +326,7 @@ def train_hybrid(args):
             expected_class = batch['emotion_class'].to(device)
             au_activation = batch['au_activation'].to(device)
 
-            blendshape = hybrid_model.blendshape_system.au_to_blendshape(au_activation)
+            blendshape = hybrid_model.blendshape_system.au_to_blendshape(au_activation).to(device)
 
             # === 生成器训练 ===
             # 扩散生成（简化：用少量去噪步）
@@ -397,7 +397,7 @@ def train_hybrid(args):
             expected_class = batch['emotion_class'].to(device)
             au_activation = batch['au_activation'].to(device)
 
-            blendshape = hybrid_model.blendshape_system.au_to_blendshape(au_activation)
+            blendshape = hybrid_model.blendshape_system.au_to_blendshape(au_activation).to(device)
 
             # === 扩散损失 ===
             B = target_video.shape[0]

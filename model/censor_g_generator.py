@@ -274,7 +274,7 @@ class MotionFieldEstimator(nn.Module):
       3. 局部运动 → 密集运动场（稀疏到密集插值）
     """
 
-    def __init__(self, num_keypoints=68, num_au=17, image_size=224):
+    def __init__(self, num_keypoints=68, num_au=17, image_size=224, skip_smoothing=False):
         super().__init__()
 
         self.num_keypoints = num_keypoints
@@ -283,6 +283,9 @@ class MotionFieldEstimator(nn.Module):
 
         # 运动放大系数（关键！默认放大10倍）
         self.motion_scale = 10.0
+
+        # 是否跳过平滑网络（直接用关键点运动）
+        self.skip_smoothing = skip_smoothing
 
         # 关键点检测器
         self.keypoint_detector = KeypointDetector(num_keypoints, image_size)
@@ -421,8 +424,23 @@ class MotionFieldEstimator(nn.Module):
         # 组合为运动场
         motion_field = torch.stack([motion_field_x, motion_field_y], dim=1)  # (B, 2, H, W)
 
-        # 通过卷积网络平滑
-        motion_field = self.sparse_to_dense(motion_field)
+        # 通过卷积网络平滑（可选）
+        if self.skip_smoothing:
+            # 直接使用关键点运动，不经过压缩网络
+            motion_field = motion_field
+        else:
+            smoothed = self.sparse_to_dense(motion_field)
+
+            # 重要：不要让卷积网络压缩运动幅度
+            original_mag = motion_field.abs().mean()
+            smoothed_mag = smoothed.abs().mean()
+
+            if smoothed_mag > 0.001 and original_mag > smoothed_mag:
+                # 如果smoothed被压缩了，放大回去
+                scale_factor = original_mag / (smoothed_mag + 1e-6)
+                motion_field = smoothed * scale_factor.clamp(max=100)
+            else:
+                motion_field = smoothed
 
         return motion_field
 
@@ -536,18 +554,19 @@ class CensorGGenerator(nn.Module):
       - generated_video: 生成的微表情视频序列
     """
 
-    def __init__(self, num_au=17, num_keypoints=68, num_frames=16, image_size=224):
+    def __init__(self, num_au=17, num_keypoints=68, num_frames=16, image_size=224, skip_smoothing=True):
         super().__init__()
 
         self.num_au = num_au
         self.num_frames = num_frames
         self.image_size = image_size
 
-        # 运动场估计器
+        # 运动场估计器（默认跳过平滑网络）
         self.motion_estimator = MotionFieldEstimator(
             num_keypoints=num_keypoints,
             num_au=num_au,
-            image_size=image_size
+            image_size=image_size,
+            skip_smoothing=skip_smoothing
         )
 
         # 图像生成器

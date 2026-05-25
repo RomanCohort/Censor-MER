@@ -115,7 +115,7 @@ class SimplifiedDiffusion(nn.Module):
     def forward_diffusion(self, x0, t):
         """前向扩散"""
         noise = torch.randn_like(x0)
-        alpha_bar = self.alpha_bars[t]
+        alpha_bar = self.alpha_bars[t].to(x0.device)
         alpha_bar = alpha_bar.view(-1, 1, 1, 1, 1)
         xt = alpha_bar.sqrt() * x0 + (1 - alpha_bar).sqrt() * noise
         return xt, noise
@@ -137,21 +137,22 @@ class SimplifiedDiffusion(nn.Module):
     def generate(self, neutral_face, blendshape, num_steps=20):
         """生成视频"""
         B, C, T, H, W = neutral_face.shape
+        device = neutral_face.device
 
         # 从噪声开始
-        xt = torch.randn(B, C, T, H, W)
+        xt = torch.randn(B, C, T, H, W, device=device)
 
         # 去噪
         for i in range(num_steps):
             t = self.num_timesteps - i - 1
-            t_tensor = torch.tensor([t] * B)
+            t_tensor = torch.tensor([t] * B, device=device)
 
             # 预测噪声
             noise_pred = self.denoise_step(xt, t_tensor, blendshape)
 
             # 去噪公式
-            alpha = self.alphas[t]
-            alpha_bar = self.alpha_bars[t]
+            alpha = self.alphas[t].to(device)
+            alpha_bar = self.alpha_bars[t].to(device)
 
             if i < num_steps - 1:
                 noise = torch.randn_like(xt)
@@ -159,7 +160,7 @@ class SimplifiedDiffusion(nn.Module):
                 noise = 0
 
             xt = (xt - (1 - alpha) / (1 - alpha_bar).sqrt() * noise_pred) / alpha.sqrt()
-            xt = xt + self.betas[t].sqrt() * noise
+            xt = xt + self.betas[t].to(device).sqrt() * noise
 
         return xt
 

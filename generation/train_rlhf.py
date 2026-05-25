@@ -57,16 +57,15 @@ def load_recognition_model(checkpoint_path: str, num_classes: int = 5):
             self.fast_pathway = FastSubcorticalPathway()
             self.slow_pathway = SlowCorticalPathway()
 
-            # 融合
-            self.fusion = TSFmicroFusion(
-                fast_dim=256,
-                slow_dim=512,
-                out_dim=256
-            )
+            # 融合（使用默认config）
+            from config.defaults import FUSION_CONFIG
+            self.fusion = TSFmicroFusion(config=FUSION_CONFIG)
 
             # 简化分类头（代替复杂的MoE）
+            from config.defaults import FUSION_CONFIG
+            fused_dim = FUSION_CONFIG['fused_dim']
             self.classifier = nn.Sequential(
-                nn.Linear(256, 128),
+                nn.Linear(fused_dim, 128),
                 nn.ReLU(),
                 nn.Dropout(0.3),
                 nn.Linear(128, num_classes)

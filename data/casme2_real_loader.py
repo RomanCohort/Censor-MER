@@ -800,8 +800,20 @@ class MultiDatasetGenerator(Dataset):
         while len(frames) < self.num_frames:
             frames.append(frames[-1].clone())
 
-        neutral_face = frames[0]
+        # 关键修改：使用最后一帧作为中性脸（反向生成策略）
+        # 这样网络需要从"中性状态"生成"微表情"，而非复制第一帧
+        #
+        # 原问题：neutral_face = frames[0] ≈ target_video[0]
+        #         导致网络只需复制第一帧
+        #
+        # 新策略：neutral_face = frames[-1]（接近中性状态）
+        #         target_video = 从第一帧开始的微表情序列
+        #         网络必须学习"正向生成"运动
+        neutral_face = frames[-1]  # 使用最后一帧（更接近中性）
         target_video = torch.stack(frames, dim=1)
+
+        # 计算中性脸和目标视频的差异（用于验证）
+        first_frame_diff = (frames[0] - neutral_face).abs().mean().item()
 
         return {
             'neutral_face': neutral_face,
@@ -813,6 +825,7 @@ class MultiDatasetGenerator(Dataset):
             'subject': sample['subject'],
             'video': sample['video'],
             'dataset': sample['dataset'],
+            'neutral_target_diff': first_frame_diff,  # 中性脸和目标第一帧的差异
         }
 
 

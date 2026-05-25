@@ -645,33 +645,71 @@ class MultiDatasetGenerator(Dataset):
                             })
 
         elif name == 'SMIC':
-            # SMIC: HS/, NIR/, VIS/
+            # SMIC: HS/sXX/micro/{positive,negative,surprise}/sXX_xx_XX/reg_image*.bmp
             for condition in ['HS', 'NIR', 'VIS']:
                 cond_dir = os.path.join(root, condition)
                 if not os.path.exists(cond_dir):
                     continue
-                for subject in os.listdir(cond_dir)[:10]:
-                    subject_dir = os.path.join(cond_dir, subject)
-                    if not os.path.isdir(subject_dir):
-                        continue
-                    for video in os.listdir(subject_dir)[:10]:
-                        video_dir = os.path.join(subject_dir, video)
-                        if not os.path.isdir(video_dir):
+
+                # SMIC uses 'micro' subfolder with emotion categories
+                micro_dir = os.path.join(cond_dir, 'micro')
+                if not os.path.exists(micro_dir):
+                    # Fallback: try direct subject folders
+                    for subject in os.listdir(cond_dir)[:16]:
+                        subject_dir = os.path.join(cond_dir, subject)
+                        if not os.path.isdir(subject_dir):
                             continue
-                        frames = sorted([f for f in os.listdir(video_dir) if f.endswith('.jpg') or f.endswith('.png')])
-                        if len(frames) >= 8:
-                            emotion = self._infer_emotion_from_name(video)
-                            au = self._emotion_to_au(emotion)
-                            samples.append({
-                                'video_dir': video_dir,
-                                'frames': frames,
-                                'emotion': emotion,
-                                'au': au,
-                                'dataset': 'SMIC',
-                                'condition': condition,
-                                'subject': subject,
-                                'video': video,
-                            })
+
+                        # Check for micro folder inside subject
+                        subj_micro = os.path.join(subject_dir, 'micro')
+                        if os.path.exists(subj_micro):
+                            for emotion_cat in ['positive', 'negative', 'surprise']:
+                                emo_dir = os.path.join(subj_micro, emotion_cat)
+                                if not os.path.exists(emo_dir):
+                                    continue
+                                for video in os.listdir(emo_dir)[:10]:
+                                    video_dir = os.path.join(emo_dir, video)
+                                    if not os.path.isdir(video_dir):
+                                        continue
+                                    # SMIC uses .bmp files
+                                    frames = sorted([f for f in os.listdir(video_dir) if f.endswith('.bmp') or f.endswith('.jpg')])
+                                    if len(frames) >= 8:
+                                        emotion = 'happiness' if emotion_cat == 'positive' else ('disgust' if emotion_cat == 'negative' else 'surprise')
+                                        au = self._emotion_to_au(emotion)
+                                        samples.append({
+                                            'video_dir': video_dir,
+                                            'frames': frames,
+                                            'emotion': emotion,
+                                            'au': au,
+                                            'dataset': 'SMIC',
+                                            'condition': condition,
+                                            'subject': subject,
+                                            'video': video,
+                                        })
+                else:
+                    # Direct micro folder at condition level
+                    for emotion_cat in ['positive', 'negative', 'surprise']:
+                        emo_dir = os.path.join(micro_dir, emotion_cat)
+                        if not os.path.exists(emo_dir):
+                            continue
+                        for video in os.listdir(emo_dir)[:20]:
+                            video_dir = os.path.join(emo_dir, video)
+                            if not os.path.isdir(video_dir):
+                                continue
+                            frames = sorted([f for f in os.listdir(video_dir) if f.endswith('.bmp') or f.endswith('.jpg')])
+                            if len(frames) >= 8:
+                                emotion = 'happiness' if emotion_cat == 'positive' else ('disgust' if emotion_cat == 'negative' else 'surprise')
+                                au = self._emotion_to_au(emotion)
+                                samples.append({
+                                    'video_dir': video_dir,
+                                    'frames': frames,
+                                    'emotion': emotion,
+                                    'au': au,
+                                    'dataset': 'SMIC',
+                                    'condition': condition,
+                                    'subject': video.split('_')[0] if '_' in video else 'unknown',
+                                    'video': video,
+                                })
 
         elif name == 'SAMM':
             # SAMM: SAMM/subXX/videoXX/

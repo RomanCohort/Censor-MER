@@ -249,6 +249,9 @@ class PPOTrainer:
         self.clip_ratio = clip_ratio
         self.entropy_coef = entropy_coef
 
+        # 设备
+        self.device = next(generator.parameters()).device
+
         # 优化器
         self.optimizer = torch.optim.Adam(generator.parameters(), lr=lr)
 
@@ -257,7 +260,7 @@ class PPOTrainer:
             nn.Linear(128, 64),
             nn.ReLU(),
             nn.Linear(64, 1),
-        )
+        ).to(self.device)
 
         # 记录
         self.training_log = {
@@ -289,10 +292,10 @@ class PPOTrainer:
         Returns:
             metrics: 训练指标
         """
-        neutral_face = batch['neutral_face']
-        target_video = batch['target_video']
-        expected_class = batch['emotion_class']
-        au_activation = batch['au_activation']
+        neutral_face = batch['neutral_face'].to(self.device)
+        target_video = batch['target_video'].to(self.device)
+        expected_class = batch['emotion_class'].to(self.device)
+        au_activation = batch['au_activation'].to(self.device)
 
         # === Step 1: 生成视频 ===
         generated_video, motion_fields = self.generator(neutral_face, au_activation)

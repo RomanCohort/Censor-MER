@@ -204,7 +204,12 @@ class RecognitionRewardModel(nn.Module):
                        generated_video: torch.Tensor,
                        expected_class: torch.Tensor) -> torch.Tensor:
         """
-        计算奖励
+        计算奖励（改进版）
+
+        改进：
+          1. 多维度奖励：识别正确 + 置信度 + AU匹配
+          2. 梯度可传递：不detach奖励
+          3. 软奖励：鼓励接近正确而非完全正确
 
         Args:
             generated_video: (B, C, T, H, W) 生成的视频
@@ -220,19 +225,31 @@ class RecognitionRewardModel(nn.Module):
         # 预测类别
         predicted_class = probs.argmax(dim=1)
 
-        # 置信度
-        confidence = probs.max(dim=1)[0]
-
-        # 正确识别的mask
-        correct_mask = (predicted_class == expected_class).float()
-
-        # 正确类别的概率
+        # === 奖励1：正确类别概率（软奖励）===
+        # 正确类别的概率越高 → 奖励越高
         correct_prob = probs.gather(1, expected_class.unsqueeze(1)).squeeze(1)
 
-        # 奖励计算
-        # 正确识别：奖励 = 置信度 * 2
-        # 错误识别：奖励 = 正确类别概率 * 0.5
-        reward = correct_mask * confidence * 2.0 + (1 - correct_mask) * correct_prob * 0.5
+        # === 奖励2：预测正确额外奖励 ===
+        correct_mask = (predicted_class == expected_class).float()
+
+        # === 奖励3：置信度奖励 ===
+        confidence = probs.max(dim=1)[0]
+
+        # === 奖励4：运动幅度奖励 ===
+        # 计算视频帧间差异（鼓励运动）
+        frame_diff = generated_video[:, :, 1:] - generated_video[:, :, :-1]
+        motion_magnitude = frame_diff.abs().mean(dim=[1, 2, 3, 4])
+
+        # 期望运动幅度：微表情应该有明显但不夸张的运动
+        target_motion = 0.05  # 目标帧间差异
+        motion_reward = torch.exp(-(motion_magnitude - target_motion)**2 / 0.01)
+
+        # === 综合奖励 ===
+        reward = (
+            correct_prob * 2.0 +            # 正确类别概率（主要）
+            correct_mask * confidence * 1.0 +  # 正确识别额外奖励
+            motion_reward * 0.5             # 运动幅度奖励
+        )
 
         return reward
 

@@ -184,14 +184,14 @@ def create_feedback_interface(checkpoint_path: str = None, api_key: str = None):
     storage = FeedbackStorage()
     generator = VideoGeneratorWrapper(
         checkpoint_path=checkpoint_path,
-        use_llm=True,
+        use_llm=False,  # 不使用LLM，直接本地生成
         api_key=api_key,
     )
 
     # CSS样式
     css = """
     .feedback-container {
-        max-width: 800px;
+        max-width: 900px;
         margin: auto;
         padding: 20px;
     }
@@ -207,6 +207,12 @@ def create_feedback_interface(checkpoint_path: str = None, api_key: str = None):
         padding: 15px;
         border-radius: 10px;
         margin-top: 20px;
+    }
+    .batch-test-box {
+        background: #e8f4e8;
+        padding: 15px;
+        border-radius: 10px;
+        margin-top: 10px;
     }
     """
 

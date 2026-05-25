@@ -31,24 +31,25 @@ class LLMInterface:
     支持多种LLM后端：
       - OpenAI API (GPT-4)
       - Anthropic API (Claude)
+      - DeepSeek API (国产，性价比高)
       - 本地模型 (Ollama)
       - AutoDL内置模型
     """
 
     def __init__(self,
-                 backend: str = 'openai',
+                 backend: str = 'deepseek',
                  api_key: str = None,
                  model: str = None,
                  base_url: str = None):
         """
         Args:
-            backend: LLM后端 ('openai', 'anthropic', 'ollama', 'autodl')
+            backend: LLM后端 ('openai', 'anthropic', 'deepseek', 'ollama', 'autodl')
             api_key: API密钥
             model: 模型名称
             base_url: 自定义API地址
         """
         self.backend = backend
-        self.api_key = api_key or os.environ.get('OPENAI_API_KEY', '')
+        self.api_key = api_key or os.environ.get('DEEPSEEK_API_KEY', '')
         self.model = model or self._get_default_model()
         self.base_url = base_url
 
@@ -58,11 +59,13 @@ class LLMInterface:
             return 'gpt-4o-mini'
         elif self.backend == 'anthropic':
             return 'claude-3-haiku-20240307'
+        elif self.backend == 'deepseek':
+            return 'deepseek-chat'  # 或 'deepseek-coder'
         elif self.backend == 'ollama':
             return 'llama3'
         elif self.backend == 'autodl':
             return 'local-model'
-        return 'gpt-4o-mini'
+        return 'deepseek-chat'
 
     def call(self, prompt: str, system_prompt: str = None) -> str:
         """
@@ -79,12 +82,51 @@ class LLMInterface:
             return self._call_openai(prompt, system_prompt)
         elif self.backend == 'anthropic':
             return self._call_anthropic(prompt, system_prompt)
+        elif self.backend == 'deepseek':
+            return self._call_deepseek(prompt, system_prompt)
         elif self.backend == 'ollama':
             return self._call_ollama(prompt, system_prompt)
         elif self.backend == 'autodl':
             return self._call_autodl(prompt, system_prompt)
         else:
             # 降级到规则解析
+            return self._fallback_parse(prompt)
+
+    def _call_deepseek(self, prompt: str, system_prompt: str) -> str:
+        """
+        调用DeepSeek API
+
+        DeepSeek API兼容OpenAI格式，性价比高：
+          - deepseek-chat: 通用对话模型
+          - deepseek-coder: 代码专用模型
+        价格: ~0.001元/千tokens（比GPT-4便宜100倍）
+        """
+        try:
+            import openai
+
+            # DeepSeek API地址
+            base_url = self.base_url or "https://api.deepseek.com/v1"
+
+            client = openai.OpenAI(
+                api_key=self.api_key,
+                base_url=base_url,
+            )
+
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
+
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                max_tokens=500,
+                temperature=0.3,
+            )
+            return response.choices[0].message.content
+
+        except Exception as e:
+            print(f"[LLMInterface] DeepSeek call failed: {e}")
             return self._fallback_parse(prompt)
 
     def _call_openai(self, prompt: str, system_prompt: str) -> str:
@@ -269,12 +311,12 @@ FACS (Facial Action Coding System) AU编码：
 """
 
     def __init__(self,
-                 llm_backend: str = 'openai',
+                 llm_backend: str = 'deepseek',
                  api_key: str = None,
                  model: str = None):
         """
         Args:
-            llm_backend: LLM后端
+            llm_backend: LLM后端 (默认deepseek)
             api_key: API密钥
             model: 模型名称
         """
@@ -392,14 +434,14 @@ class LLMDrivenGenerator:
 
     def __init__(self,
                  checkpoint_path: str = None,
-                 llm_backend: str = 'openai',
+                 llm_backend: str = 'deepseek',
                  api_key: str = None,
                  image_size: int = 224,
                  num_frames: int = 16):
         """
         Args:
             checkpoint_path: 生成器checkpoint
-            llm_backend: LLM后端 ('openai', 'anthropic', 'ollama', 'autodl')
+            llm_backend: LLM后端 ('deepseek', 'openai', 'anthropic', 'ollama', 'autodl')
             api_key: LLM API密钥
             image_size: 图像尺寸
             num_frames: 帧数
@@ -478,7 +520,7 @@ def demo_llm_generator():
     print("="*60)
 
     # 创建分析器（使用降级模式，因为没有API key）
-    analyzer = LLMPromptAnalyzer(llm_backend='openai', api_key='dummy')
+    analyzer = LLMPromptAnalyzer(llm_backend='deepseek', api_key='dummy')
 
     # 测试提示词
     test_prompts = [
@@ -518,11 +560,20 @@ def demo_llm_generator():
             print(f"    Stage {i+1}: {stage.get('emotion')} (intensity={stage.get('intensity')})")
 
     print("\n[3] Usage Example")
-    print("  # With real LLM API:")
+    print("  # With DeepSeek API (推荐，性价比高):")
+    print("  gen = LLMDrivenGenerator(")
+    print("      checkpoint_path='model.pth',")
+    print("      llm_backend='deepseek',")
+    print("      api_key='your-deepseek-api-key'")
+    print("  )")
+    print("  gen.generate('user_photo.jpg', '微笑', 'output.mp4')")
+    print("  gen.generate('user_photo.jpg', '先惊讶后微笑', 'output2.mp4')")
+    print("")
+    print("  # With OpenAI API:")
     print("  gen = LLMDrivenGenerator(")
     print("      checkpoint_path='model.pth',")
     print("      llm_backend='openai',")
-    print("      api_key='your-api-key'")
+    print("      api_key='your-openai-key'")
     print("  )")
     print("  gen.generate('user_photo.jpg', '微笑', 'output.mp4')")
     print("  gen.generate('user_photo.jpg', '先惊讶后微笑', 'output2.mp4')")

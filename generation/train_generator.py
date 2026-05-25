@@ -29,6 +29,34 @@ from model.censor_g_generator import CensorGGenerator, FOMMBaseline, VideoDiscri
 from data.casme2_real_loader import CASME2RealDataset, CASME2GeneratorDataset, MultiDatasetGenerator
 
 
+class PerceptualLoss(nn.Module):
+    """Perceptual loss using VGG features"""
+    def __init__(self):
+        super().__init__()
+        # 使用简单的特征提取（避免需要预训练模型）
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 64, 3, 1, 1),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, 3, 1, 1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(64, 128, 3, 1, 1),
+            nn.ReLU(),
+            nn.Conv2d(128, 128, 3, 1, 1),
+            nn.ReLU(),
+        )
+        # 固定参数，不训练
+        for param in self.features.parameters():
+            param.requires_grad = False
+
+    def forward(self, pred, target):
+        # 提取特征
+        pred_feat = self.features(pred)
+        target_feat = self.features(target)
+        # 计算特征差异
+        return F.l1_loss(pred_feat, target_feat)
+
+
 def compute_fid(fake_features, real_features):
     """计算FID"""
     mu_fake = fake_features.mean(axis=0)
@@ -159,6 +187,9 @@ def train_generator(args):
     # 损失函数
     l1_loss = nn.L1Loss()
 
+    # Perceptual Loss
+    perceptual_loss = PerceptualLoss().to(device)
+
     # 训练循环
     print("\n[3] Training...")
     os.makedirs(args.save_dir, exist_ok=True)
@@ -194,8 +225,29 @@ def train_generator(args):
 
             generated_video, motion_fields = generator(neutral_face, au_activation)
 
-            # L1重建损失
-            recon_loss = l1_loss(generated_video, target_video)
+            # 1. L1重建损失（降低权重）
+            recon_loss = l1_loss(generated_video, target_video) * 0.5
+
+            # 2. Perceptual损失（更重要）
+            # 取第一帧计算perceptual loss
+            gen_first = generated_video[:, :, 0]
+            target_first = target_video[:, :, 0]
+            perc_loss = perceptual_loss(gen_first, target_first) * 0.5
+
+            # 3. 运动约束损失（强制运动场不为零）
+            motion_loss = 0
+            for motion in motion_fields:
+                motion_mag = motion.abs().mean()
+                # 目标运动幅度：鼓励运动幅度在5-20像素范围
+                target_motion = 10.0  # 目标运动幅度
+                motion_loss += ((motion_mag - target_motion) ** 2) * 0.05
+
+            # 4. 时间变化损失（强制帧之间有变化）
+            frame_diff = generated_video[:, :, 1:] - generated_video[:, :, :-1]
+            temporal_var_loss = -frame_diff.abs().mean() * 0.1  # 鼓励变化
+
+            # 总损失
+            base_loss = recon_loss + perc_loss + motion_loss + temporal_var_loss
 
             # GAN损失（可选）
             if args.use_gan:
@@ -203,9 +255,9 @@ def train_generator(args):
                 gan_loss = F.binary_cross_entropy_with_logits(
                     fake_logits, torch.ones_like(fake_logits)
                 )
-                g_loss = recon_loss + args.gan_weight * gan_loss
+                g_loss = base_loss + args.gan_weight * gan_loss
             else:
-                g_loss = recon_loss
+                g_loss = base_loss
 
             g_loss.backward()
             g_optimizer.step()

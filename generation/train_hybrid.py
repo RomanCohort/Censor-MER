@@ -270,7 +270,7 @@ def train_hybrid(args):
 
             # 扩散训练步
             B = target_video.shape[0]
-            t = torch.randint(0, diffusion.num_timesteps, (B,), device=device)
+            t = torch.randint(0, diffusion.num_timesteps, (B,))  # CPU上
 
             # 前向扩散
             xt, noise = diffusion.forward_diffusion(target_video, t)

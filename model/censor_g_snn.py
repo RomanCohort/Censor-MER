@@ -483,11 +483,18 @@ class V4ReceptiveFieldMotion(nn.Module):
         self.sigma_center = sigma_center
         self.sigma_surround = sigma_surround
 
-        # 创建感受野模板
-        self.receptive_fields = self._create_receptive_fields()
+        # 创建感受野模板并注册为buffer（自动跟随设备）
+        receptive_fields = self._create_receptive_fields()  # list of (H, W) tensors
+        receptive_fields_stack = torch.stack(receptive_fields, dim=0)  # (17, H, W)
+        self.register_buffer('receptive_fields', receptive_fields_stack)
 
         # AU到运动方向的映射
-        self.au_motion_direction = self._create_motion_directions()
+        directions_dict = self._create_motion_directions()
+        directions_tensor = torch.zeros(num_au, 2)
+        for idx, (dx, dy) in directions_dict.items():
+            directions_tensor[idx, 0] = dx
+            directions_tensor[idx, 1] = dy
+        self.register_buffer('au_motion_directions', directions_tensor)
 
     def forward(self, au_temporal, time_idx=None):
         """
@@ -509,18 +516,19 @@ class V4ReceptiveFieldMotion(nn.Module):
         # 当前帧的AU激活
         au_frame = au_temporal[:, :, time_idx]  # (B, 17)
 
-        # 初始化运动场
+        # 初始化运动场（已在正确设备）
         motion_field = torch.zeros(B, 2, self.image_size, self.image_size,
                                    device=au_temporal.device)
 
-        # 为每个AU生成感受野运动
+        # 为每个AU生成感受野运动（使用buffer，自动在正确设备）
         for au_idx in range(self.num_au):
             au_intensity = au_frame[:, au_idx]  # (B,)
 
-            # 获取该AU的运动方向
-            dx, dy = self.au_motion_direction[au_idx]
+            # 获取该AU的运动方向（从buffer）
+            dx = self.au_motion_directions[au_idx, 0].item()
+            dy = self.au_motion_directions[au_idx, 1].item()
 
-            # 应用感受野
+            # 应用感受野（从buffer，已在正确设备）
             rf = self.receptive_fields[au_idx]  # (H, W)
 
             # 加权运动

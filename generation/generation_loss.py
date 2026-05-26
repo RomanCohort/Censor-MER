@@ -15,18 +15,25 @@ class MicroExpressionGenerationLoss(nn.Module):
       1. Reconstruction loss (pixel-level)
       2. Perceptual loss (feature-level)
       3. AU consistency loss
-      4. Temporal consistency loss
-      5. Motion magnitude constraint (ME subtlety)
+      4. Temporal smoothness loss (penalize acceleration, allow velocity)
+      5. Motion magnitude guidance (range constraint, not upper limit)
+
+    CHANGES (Phase 1 Optimization):
+      - temporal_weight → temporal_smoothness_weight = 0.1
+      - magnitude_limit removed → motion_min=5.0, motion_max=30.0
+      - temporal_consistency_loss → temporal_smoothness_loss (penalize acceleration)
+      - magnitude_constraint → motion_magnitude_guidance (range constraint)
     """
 
     def __init__(self, perceptual_weight=0.5, au_weight=0.3,
-                 temporal_weight=0.2, magnitude_limit=0.3):
+                 temporal_smoothness_weight=0.1, motion_min=5.0, motion_max=30.0):
         super().__init__()
 
         self.perceptual_weight = perceptual_weight
         self.au_weight = au_weight
-        self.temporal_weight = temporal_weight
-        self.magnitude_limit = magnitude_limit
+        self.temporal_smoothness_weight = temporal_smoothness_weight
+        self.motion_min = motion_min
+        self.motion_max = motion_max
 
         # Perceptual loss (use VGG features if available)
         self.perceptual_net = None  # Can load VGG later
@@ -59,18 +66,18 @@ class MicroExpressionGenerationLoss(nn.Module):
         else:
             losses['au'] = torch.tensor(0.0)
 
-        # 4. Temporal consistency loss (frame smoothness)
-        losses['temporal'] = self._temporal_consistency_loss(generated)
+        # 4. Temporal smoothness loss (penalize acceleration, allow velocity)
+        losses['temporal'] = self._temporal_smoothness_loss(generated)
 
-        # 5. Motion magnitude constraint
-        losses['magnitude'] = self._magnitude_constraint(generated, real)
+        # 5. Motion magnitude guidance (range constraint)
+        losses['magnitude'] = self._motion_magnitude_guidance(generated, real)
 
         # Total loss
         total_loss = (
             losses['reconstruction'] +
             self.perceptual_weight * losses['perceptual'] +
             self.au_weight * losses['au'] +
-            self.temporal_weight * losses['temporal'] +
+            self.temporal_smoothness_weight * losses['temporal'] +
             losses['magnitude']
         )
 
@@ -116,49 +123,66 @@ class MicroExpressionGenerationLoss(nn.Module):
         # For now, return 0
         return torch.tensor(0.0)
 
-    def _temporal_consistency_loss(self, video):
+    def _temporal_smoothness_loss(self, video):
         """
-        Compute temporal consistency loss.
+        Compute temporal smoothness loss.
 
-        Ensures smooth transitions between frames.
+        PENALIZE ACCELERATION (2nd derivative), ALLOW VELOCITY (1st derivative).
+
+        This is the key fix: original temporal_consistency_loss penalized ALL motion,
+        which prevented micro-expressions from having any movement.
+
+        Micro-expressions NEED motion, but should be SMOOTH (no jerky acceleration).
         """
         B, C, T, H, W = video.shape
 
-        if T < 2:
+        if T < 3:
             return torch.tensor(0.0)
 
-        # Compute frame differences
-        frame_diff = video[:, :, 1:, :, :] - video[:, :, :-1, :, :]
+        # Compute frame differences (velocity)
+        frame_diff_1 = video[:, :, 1:, :, :] - video[:, :, :-1, :, :]  # 1st derivative
 
-        # Penalize large jumps
-        consistency_loss = frame_diff.abs().mean()
+        # Compute acceleration (2nd derivative)
+        # acceleration = velocity[t+1] - velocity[t]
+        acceleration = frame_diff_1[:, :, 1:, :, :] - frame_diff_1[:, :, :-1, :, :]
 
-        return consistency_loss
+        # Penalize acceleration (jerky motion), NOT velocity
+        smoothness_loss = acceleration.abs().mean()
 
-    def _magnitude_constraint(self, generated, real):
+        return smoothness_loss
+
+    def _motion_magnitude_guidance(self, generated, real):
         """
-        Constrain motion magnitude for micro-expression subtlety.
+        Guide motion magnitude to be within micro-expression range.
 
-        Micro-expressions have small motion magnitude.
+        KEY FIX: Original magnitude_constraint was an UPPER LIMIT (0.3),
+        which prevented ANY motion. Now we use RANGE guidance:
+          - motion < motion_min: penalize (too subtle to see)
+          - motion in [min, max]: no penalty (ideal)
+          - motion > motion_max: penalize (too exaggerated for ME)
+
+        Default: motion_min=5 pixels, motion_max=30 pixels.
         """
         # Compute motion magnitude (difference from neutral frame)
         neutral_frame = real[:, :, 0:1, :, :]  # First frame
 
         gen_motion = generated - neutral_frame
-        real_motion = real - neutral_frame
 
-        # Compute magnitude
-        gen_magnitude = gen_motion.abs().mean()
-        real_magnitude = real_motion.abs().mean()
+        # Average pixel motion magnitude
+        # Use per-pixel absolute difference, then average
+        avg_motion = gen_motion.abs().mean(dim=[1, 2, 3, 4])  # (B,)
 
-        # Constraint: generated should not exceed real by much
-        # and should stay within ME subtlety bounds
-        magnitude_penalty = torch.relu(gen_magnitude - self.magnitude_limit)
+        # Range guidance (not upper limit)
+        # Low penalty: motion should be at least motion_min
+        low_penalty = torch.relu(self.motion_min - avg_motion)
 
-        # Also penalize being too different from real
-        magnitude_diff = (gen_magnitude - real_magnitude).abs()
+        # High penalty: motion should not exceed motion_max
+        high_penalty = torch.relu(avg_motion - self.motion_max)
 
-        return magnitude_penalty + 0.1 * magnitude_diff
+        # Combine: penalize being outside the range
+        guidance_loss = (low_penalty + 0.5 * high_penalty).mean()
+
+        return guidance_loss
 
 
 class GANLoss(nn.Module):

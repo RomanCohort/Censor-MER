@@ -236,19 +236,34 @@ class RecognitionRewardModel(nn.Module):
         confidence = probs.max(dim=1)[0]
 
         # === 奖励4：运动幅度奖励 ===
+        # PHASE 3 FIX: 分段运动奖励，鼓励适度运动而非静止
+        MIN_MOTION = 0.02   # 约5像素（下限）
+        MAX_MOTION = 0.08   # 约18像素（上限）
+        TARGET_MOTION = 0.04  # 约10像素（目标）
+
         # 计算视频帧间差异（鼓励运动）
         frame_diff = generated_video[:, :, 1:] - generated_video[:, :, :-1]
         motion_magnitude = frame_diff.abs().mean(dim=[1, 2, 3, 4])
 
-        # 期望运动幅度：微表情应该有明显但不夸张的运动
-        target_motion = 0.05  # 目标帧间差异
-        motion_reward = torch.exp(-(motion_magnitude - target_motion)**2 / 0.01)
+        # 分段奖励：
+        # - 太小（<MIN）：低奖励（太弱看不见）
+        # - 适中（MIN~MAX）：高奖励（可见但不过度）
+        # - 太大（>MAX）：中等奖励（过度夸张）
+        motion_reward = torch.where(
+            motion_magnitude < MIN_MOTION,
+            torch.exp(-(motion_magnitude - MIN_MOTION)**2 / 0.001),  # 太小：低奖励
+            torch.where(
+                motion_magnitude <= MAX_MOTION,
+                torch.ones_like(motion_magnitude),  # 适中：高奖励
+                torch.exp(-(motion_magnitude - MAX_MOTION)**2 / 0.002)  # 太大：中等奖励
+            )
+        )
 
         # === 综合奖励 ===
         reward = (
-            correct_prob * 2.0 +            # 正确类别概率（主要）
+            correct_prob * 1.5 +            # 正确类别概率（主要）
             correct_mask * confidence * 1.0 +  # 正确识别额外奖励
-            motion_reward * 0.5             # 运动幅度奖励
+            motion_reward * 1.0             # PHASE 3 FIX: 权重从0.5改为1.0
         )
 
         return reward

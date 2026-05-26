@@ -28,41 +28,43 @@ import math
 # =============================================================================
 
 # 17个AU及其神经肌肉特性
+# PHASE 4 FIX: tau_m放大3倍以适应16帧序列
+# 原始tau_m太小(5-35)，导致时间曲线陡峭，不适合微表情的平滑过渡
 AU_INFO = {
     'AU1': {'name': 'Inner Brow Raiser', 'muscle_type': 'fast', 'region': 'eyebrow_inner',
-            'tau_m': 5.0, 'R_m': 100.0},  # 快肌：小膜时间常数
+            'tau_m': 15.0, 'R_m': 100.0},  # 原5.0 → 15.0
     'AU2': {'name': 'Outer Brow Raiser', 'muscle_type': 'fast', 'region': 'eyebrow_outer',
-            'tau_m': 5.0, 'R_m': 100.0},
+            'tau_m': 15.0, 'R_m': 100.0},  # 原5.0 → 15.0
     'AU4': {'name': 'Brow Lowerer', 'muscle_type': 'fast', 'region': 'eyebrow',
-            'tau_m': 6.0, 'R_m': 120.0},
+            'tau_m': 18.0, 'R_m': 120.0},  # 原6.0 → 18.0
     'AU5': {'name': 'Upper Lid Raiser', 'muscle_type': 'fast', 'region': 'eye_upper',
-            'tau_m': 4.0, 'R_m': 80.0},
+            'tau_m': 12.0, 'R_m': 80.0},   # 原4.0 → 12.0
     'AU6': {'name': 'Cheek Raiser', 'muscle_type': 'mixed', 'region': 'cheek',
-            'tau_m': 10.0, 'R_m': 150.0},  # 混合肌：中等膜时间常数
+            'tau_m': 30.0, 'R_m': 150.0},  # 原10.0 → 30.0
     'AU7': {'name': 'Lid Tightener', 'muscle_type': 'fast', 'region': 'eye',
-            'tau_m': 4.5, 'R_m': 90.0},
+            'tau_m': 13.5, 'R_m': 90.0},   # 原4.5 → 13.5
     'AU9': {'name': 'Nose Wrinkler', 'muscle_type': 'fast', 'region': 'nose',
-            'tau_m': 5.5, 'R_m': 110.0},
+            'tau_m': 16.5, 'R_m': 110.0},  # 原5.5 → 16.5
     'AU10': {'name': 'Upper Lip Raiser', 'muscle_type': 'mixed', 'region': 'lip_upper',
-             'tau_m': 12.0, 'R_m': 160.0},
+             'tau_m': 36.0, 'R_m': 160.0},  # 原12.0 → 36.0
     'AU12': {'name': 'Lip Corner Puller', 'muscle_type': 'mixed', 'region': 'mouth_corner',
-             'tau_m': 15.0, 'R_m': 180.0},  # 嘴角：混合肌，重要表情
+             'tau_m': 45.0, 'R_m': 180.0},  # 原15.0 → 45.0 (重要表情)
     'AU14': {'name': 'Dimpler', 'muscle_type': 'slow', 'region': 'mouth_corner',
-             'tau_m': 25.0, 'R_m': 250.0},  # 慢肌：大膜时间常数
+             'tau_m': 75.0, 'R_m': 250.0},  # 原25.0 → 75.0
     'AU15': {'name': 'Lip Corner Depressor', 'muscle_type': 'slow', 'region': 'mouth_corner',
-             'tau_m': 28.0, 'R_m': 280.0},
+             'tau_m': 84.0, 'R_m': 280.0},  # 原28.0 → 84.0
     'AU17': {'name': 'Chin Raiser', 'muscle_type': 'slow', 'region': 'chin',
-             'tau_m': 30.0, 'R_m': 300.0},
+             'tau_m': 90.0, 'R_m': 300.0},  # 原30.0 → 90.0
     'AU20': {'name': 'Lip Stretcher', 'muscle_type': 'mixed', 'region': 'mouth',
-             'tau_m': 18.0, 'R_m': 200.0},
+             'tau_m': 54.0, 'R_m': 200.0},  # 原18.0 → 54.0
     'AU23': {'name': 'Lip Tightener', 'muscle_type': 'slow', 'region': 'mouth',
-             'tau_m': 22.0, 'R_m': 220.0},
+             'tau_m': 66.0, 'R_m': 220.0},  # 原22.0 → 66.0
     'AU24': {'name': 'Lip Pressor', 'muscle_type': 'slow', 'region': 'mouth',
-             'tau_m': 24.0, 'R_m': 240.0},
+             'tau_m': 72.0, 'R_m': 240.0},  # 原24.0 → 72.0
     'AU25': {'name': 'Lips Part', 'muscle_type': 'mixed', 'region': 'mouth',
-             'tau_m': 20.0, 'R_m': 210.0},
+             'tau_m': 60.0, 'R_m': 210.0},  # 原20.0 → 60.0
     'AU26': {'name': 'Jaw Drop', 'muscle_type': 'slow', 'region': 'jaw',
-             'tau_m': 35.0, 'R_m': 350.0},
+             'tau_m': 105.0, 'R_m': 350.0},  # 原35.0 → 105.0
 }
 
 # AU索引映射
@@ -373,8 +375,9 @@ class V3MembraneTemporalDynamics(nn.Module):
         self.register_buffer('tau_m', torch.tensor(tau_m_values))
 
         # Onset/Decay时间比例（可学习）
-        self.onset_ratio = nn.Parameter(torch.tensor(0.3))
-        self.apex_ratio = nn.Parameter(torch.tensor(0.2))
+        # PHASE 4 FIX: 调整比例使曲线更平滑
+        self.onset_ratio = nn.Parameter(torch.tensor(0.35))  # 原0.3 → 0.35
+        self.apex_ratio = nn.Parameter(torch.tensor(0.15))   # 原0.2 → 0.15
 
     def forward(self, au_activation, num_frames=None):
         """
@@ -424,19 +427,24 @@ class V3MembraneTemporalDynamics(nn.Module):
         """
         curve = torch.zeros(T)
 
-        # Onset阶段：膜电位上升（积分）
+        # PHASE 4 FIX: 平滑过渡替代硬切换
+        # Onset阶段：膜电位上升（积分）- 使用sigmoid-like平滑曲线
         for t in range(onset_end):
-            # LIF积分：V = I * R * (1 - exp(-t/tau))
-            curve[t] = 1.0 * (1 - math.exp(-t / tau_m))
+            # Sigmoid-like上升：更平滑的过渡
+            normalized_t = t / max(onset_end, 1)
+            # 使用tanh实现平滑上升
+            curve[t] = 0.5 * (1 + math.tanh(4 * normalized_t - 2))
 
         # Apex阶段：峰值保持
         curve[onset_end:apex_end] = 1.0
 
         # Offset阶段：膜电位衰减
-        tau_decay = tau_m * 1.5  # 衰减比上升慢
+        tau_decay = tau_m * 2.0  # PHASE 4 FIX: 衰减比上升慢（原1.5 → 2.0）
         for t in range(apex_end, T):
             dt = t - apex_end
-            curve[t] = math.exp(-dt / tau_decay)
+            # 使用平滑衰减
+            normalized_dt = dt / max(T - apex_end, 1)
+            curve[t] = math.exp(-dt / tau_decay) * (1 - 0.3 * normalized_dt)
 
         return curve
 

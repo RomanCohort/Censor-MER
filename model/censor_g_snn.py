@@ -411,6 +411,9 @@ class V3MembraneTemporalDynamics(nn.Module):
         temporal_curves = torch.stack(temporal_curves, dim=0)  # (17, T)
         temporal_curves = temporal_curves.unsqueeze(0).expand(B, -1, -1)  # (B, 17, T)
 
+        # FIX: 移动到正确的设备
+        temporal_curves = temporal_curves.to(au_activation.device)
+
         # 应用AU激活强度
         au_temporal = au_activation.unsqueeze(-1) * temporal_curves  # (B, 17, T)
 

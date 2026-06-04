@@ -1,7 +1,7 @@
 # Component Contribution Analysis in Biomimetic Micro-Expression Recognition: A Comprehensive Ablation Study
 
 **Authors**: TBD
-**Target Venue**: IEEE Transactions on Affective Computing (IF ~4.0)
+**Target Venue**: Neurocomputing (Elsevier, IF ~3.5)
 **Status**: Draft v2.0
 **Generated**: 2026-06-03
 

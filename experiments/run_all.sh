@@ -3,11 +3,11 @@
 # Run All Experiments (Parallel Version)
 # =============================================================================
 # Usage:
-#   bash experiments/run_all.sh          # Run all 4 experiments
+#   bash experiments/run_all.sh          # Run all 5 experiments
 #   bash experiments/run_all.sh 1 3 4    # Run specific experiments
 # =============================================================================
 
-EXPS=${@:-"1 2 3 4"}
+EXPS=${@:-"1 2 3 4 5"}
 LOG_DIR="results/logs"
 mkdir -p $LOG_DIR
 
@@ -38,6 +38,10 @@ for exp in $EXPS; do
             echo ">>> Exp 4: Sparse Control (background)"
             nohup python experiments/exp4_sparse_control.py > $LOG_FILE 2>&1 &
             ;;
+        5)
+            echo ">>> Exp 5: Training Curves (background)"
+            nohup python experiments/exp5_training_curves.py > $LOG_FILE 2>&1 &
+            ;;
         *)
             echo "Unknown: $exp"
             ;;
@@ -53,4 +57,4 @@ echo "=============================================="
 
 # Show running processes
 sleep 2
-ps aux | grep "exp[1-4]" | grep -v grep
+ps aux | grep "exp[1-5]" | grep -v grep

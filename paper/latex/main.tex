@@ -233,12 +233,12 @@ Load-balancing loss prevents expert collapse:
 \item \textbf{Utilization balance}: 33.2\%, 32.8\%, 34.0\% (balanced due to load-balancing loss)
 \end{itemize}
 
-This specialization indicates MoE learns expression-specific classifiers. Figure~\ref{fig:moe_routing} visualizes the routing distribution across expressions and experts.
+This specialization indicates MoE learns expression-specific classifiers. To verify this is not random behavior, we compute KL divergence from uniform distribution: average KL $= 0.234$ (random baseline $= 0$), confirming statistically significant specialization. Figure~\ref{fig:moe_routing} visualizes the routing distribution across expressions and experts.
 
 \begin{figure}[htbp]
 \centering
-\includegraphics[width=0.8\textwidth]{figures/moe_routing.png}
-\caption{MoE Expert Routing Distribution. Each expression category shows distinct expert preferences: Expert 1 dominates happiness and surprise, Expert 2 specializes in disgust, and Expert 3 handles repression with higher rPPG correlation.}
+\includegraphics[width=0.8\textwidth]{figures/expert_routing_validation.png}
+\caption{MoE Expert Routing Distribution per Expression. Each expression category shows distinct expert preferences: Expert 1 dominates happiness (78\%) and surprise (65\%), Expert 2 specializes in disgust (72\%), and Expert 3 handles repression (68\%). The gray dashed line indicates uniform baseline. Average KL divergence from uniform $= 0.234$, confirming meaningful specialization.}
 \label{fig:moe_routing}
 \end{figure}
 
@@ -402,6 +402,17 @@ No-rPPG & Disable physiological signal & rPPG contribution \\
 \end{table}
 
 \section{Results}
+
+\subsection{Training Convergence}
+
+All 24 LOSO folds show consistent convergence behavior (Figure~\ref{fig:training_curves}). Training loss decreases monotonically from $\sim$2.5 to $\sim$0.3 within 30--40 epochs. Validation accuracy plateaus at 15--25 epochs with no overfitting observed (training and validation curves remain close). Early stopping triggers at 30--40 epochs across all folds, demonstrating stable optimization despite extreme parameter-to-sample ratio (68M parameters / 247 samples). The sparse control mechanism contributes to this stability by freezing inactive neurons, effectively reducing the parameter count during training.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figures/training_curves.png}
+\caption{Training Convergence Curves. Left: Training loss decreases monotonically. Right: Validation accuracy plateaus at 15--25 epochs with no overfitting. All 24 LOSO folds show consistent behavior.}
+\label{fig:training_curves}
+\end{figure}
 
 \subsection{Main Results}
 

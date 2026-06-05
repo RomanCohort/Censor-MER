@@ -78,9 +78,9 @@ Micro-expression recognition \sep component ablation \sep dual-pathway network \
 
 \subsection{Motivation}
 
-Micro-expressions (MEs) are involuntary facial movements lasting 40--200 ms that reveal concealed emotions. Micro-expression recognition (MER) remains challenging due to brief duration, low intensity, and partial facial involvement. Recent advances in deep learning have achieved high accuracy on benchmark datasets, with state-of-the-art methods reporting 90--94\% on CASME II.
+Micro-expressions (MEs) are involuntary facial movements lasting 40--200 ms that reveal concealed emotions \cite{ekman1969nonverbal}. Micro-expression recognition (MER) remains challenging due to brief duration, low intensity, and partial facial involvement. Recent advances in deep learning have achieved high accuracy on benchmark datasets, with state-of-the-art methods reporting 90--94\% on CASME II \cite{chen2024multiscale,ma2024hybrid}.
 
-Neuroscience research shows that human facial expression perception involves dual neural pathways: a fast subcortical route (superior colliculus $\rightarrow$ pulvinar $\rightarrow$ amygdala) for rapid coarse processing, and a slow cortical route (V1 $\rightarrow$ V2 $\rightarrow$ V4 $\rightarrow$ fusiform face area) for fine-grained analysis. This dual-pathway architecture suggests a possible improvement for MER systems.
+Neuroscience research shows that human facial expression perception involves dual neural pathways: a fast subcortical route (superior colliculus $\rightarrow$ pulvinar $\rightarrow$ amygdala) for rapid coarse processing \cite{morris1999subcortical}, and a slow cortical route (V1 $\rightarrow$ V2 $\rightarrow$ V4 $\rightarrow$ fusiform face area) for fine-grained analysis \cite{kanwisher1997fusiform}. This dual-pathway architecture suggests a possible improvement for MER systems.
 
 \subsection{Research Question and Hypothesis}
 
@@ -121,7 +121,7 @@ Our ablation study reveals multiple findings:
 
 \subsection{Micro-Expression Recognition Methods}
 
-\textbf{Handcrafted Era}: LBP-TOP achieved 70.26\% on CASME II using spatiotemporal texture encoding. MDMO quantified motion patterns, reaching $\sim$65\%.
+\textbf{Handcrafted Era}: LBP-TOP achieved 63.3\% on CASME II using spatiotemporal texture encoding \cite{zhao2014lpbtop}. MDMO quantified motion patterns, reaching 66.4\% \cite{liu2016mdmo}.
 
 \textbf{Deep Learning Era}: OFF-ApexNet combined optical flow with apex frame detection, achieving 87.64\% on CASME II but only 54.09\% on SAMM. 3D CNNs enabled spatiotemporal feature learning.
 
@@ -488,10 +488,10 @@ These subjects lack representation of difficult classes (disgust, repression), l
 \toprule
 \textbf{Method} & \textbf{Accuracy} & \textbf{Protocol} & \textbf{Code} \\
 \midrule
-LBP-TOP & 70.26\% & Not specified & No \\
+LBP-TOP & 63.3\% & LOSO (verified) & No \\
 OFF-ApexNet & 87.64\% & Not specified & Partial \\
-Multi-scale 3D ResNet & 91.35\% & Not specified & No \\
-Hybrid Attention-3DNet & 93.79\% & Not specified & No \\
+Multi-scale 3D ResNet & 91.35\% \cite{chen2024multiscale} & Not specified & No \\
+Hybrid Attention-3DNet & 93.79\% \cite{ma2024hybrid} & Not specified & No \\
 \textbf{Censor (Ours)} & \textbf{87.74\%} & \textbf{Standard LOSO (24 folds)} & Planned \\
 \bottomrule
 \end{tabular}

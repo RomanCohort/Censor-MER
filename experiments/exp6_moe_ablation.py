@@ -205,8 +205,8 @@ def run_expert_ablation():
         def __getitem__(self, idx):
             return torch.randn(3, 16, 224, 224), torch.randint(0, 4, (1,)).item()
 
-    train_loader = DataLoader(DummyDataset(200), batch_size=8, shuffle=True)
-    test_loader = DataLoader(DummyDataset(50), batch_size=8, shuffle=False)
+    train_loader = DataLoader(DummyDataset(200), batch_size=8, shuffle=True, num_workers=0)
+    test_loader = DataLoader(DummyDataset(50), batch_size=8, shuffle=False, num_workers=0)
 
     print("\nTesting expert counts:", expert_counts)
 
@@ -217,7 +217,7 @@ def run_expert_ablation():
         params = sum(p.numel() for p in model.parameters()) / 1e3
         print(f"  Parameters: {params:.1f}K")
 
-        stats = train_and_evaluate(model, train_loader, test_loader, epochs=20, device=device)
+        stats = train_and_evaluate(model, train_loader, test_loader, epochs=10, device=device)
 
         results[E] = {
             'num_experts': E,
@@ -233,9 +233,12 @@ def run_expert_ablation():
         if 'mean' in stats.get('routing_stats', {}):
             print(f"  Expert utilization: {stats['routing_stats']['mean']}")
 
+        # Cleanup immediately after each model
         del model
         if device.type == 'cuda':
             torch.cuda.empty_cache()
+        import gc
+        gc.collect()  # Force garbage collection
 
     # Summary
     print("\n" + "=" * 60)

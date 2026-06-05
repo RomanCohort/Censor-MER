@@ -1,7 +1,7 @@
 """
-Experiment 3: Inference Latency Benchmark
-==========================================
-Benchmark inference latency for deployment guidance.
+Experiment 3: Inference Latency Benchmark (Full Implementation)
+=================================================================
+Comprehensive latency benchmark for deployment guidance.
 
 Usage:
     python experiments/exp3_latency.py
@@ -9,6 +9,7 @@ Usage:
 
 import os
 import sys
+import json
 import time
 import numpy as np
 from pathlib import Path
@@ -23,6 +24,10 @@ print("Experiment 3: Inference Latency Benchmark")
 print("=" * 60)
 print(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
+# =============================================================================
+# Configuration
+# =============================================================================
+
 try:
     from main import Censor
 except ImportError as e:
@@ -34,107 +39,189 @@ print(f"Device: {device}")
 
 if device.type == 'cuda':
     print(f"GPU: {torch.cuda.get_device_name(0)}")
+    print(f"CUDA version: {torch.version.cuda}")
 
-# Configurations
+# =============================================================================
+# Benchmark Function
+# =============================================================================
+
+def benchmark_model(model, input_shape, num_runs=200, warmup=20):
+    """Comprehensive benchmark with multiple metrics."""
+
+    model.eval()
+    B, C, T, H, W = input_shape
+    video = torch.randn(B, C, T, H, W).to(device)
+
+    # Warmup
+    with torch.no_grad():
+        for _ in range(warmup):
+            _ = model(video)
+
+    if device.type == 'cuda':
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+
+    # Benchmark
+    latencies = []
+    memory_peaks = []
+
+    with torch.no_grad():
+        for i in range(num_runs):
+            if device.type == 'cuda':
+                torch.cuda.reset_peak_memory_stats()
+
+            start = time.perf_counter()
+            _ = model(video)
+
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
+                mem = torch.cuda.max_memory_allocated() / 1024 / 1024
+                memory_peaks.append(mem)
+
+            end = time.perf_counter()
+            latencies.append((end - start) * 1000)
+
+    latencies = np.array(latencies)
+
+    stats = {
+        'mean_ms': float(latencies.mean()),
+        'std_ms': float(latencies.std()),
+        'min_ms': float(latencies.min()),
+        'max_ms': float(latencies.max()),
+        'p50_ms': float(np.percentile(latencies, 50)),
+        'p90_ms': float(np.percentile(latencies, 90)),
+        'p95_ms': float(np.percentile(latencies, 95)),
+        'p99_ms': float(np.percentile(latencies, 99)),
+        'throughput_fps': float(1000 / latencies.mean()),
+        'num_runs': num_runs,
+    }
+
+    if device.type == 'cuda' and memory_peaks:
+        stats['gpu_memory_mean_mb'] = float(np.mean(memory_peaks))
+        stats['gpu_memory_max_mb'] = float(np.max(memory_peaks))
+
+    return stats
+
+
+# =============================================================================
+# Test Configurations
+# =============================================================================
+
 configs = [
     ('Full Model', {}),
     ('Fast-only', {'single_path': 'fast'}),
     ('No-rPPG', {'no_rppg': True}),
     ('With Sparse Control', {'enable_sparse_control': True}),
+    ('Minimal (Fast + No-MOE)', {'single_path': 'fast', 'no_moe': True}),
 ]
 
-B, C, T, H, W = 1, 3, 16, 224, 224
-num_runs = 100
-warmup = 10
+# Test different input sizes
+input_sizes = [
+    (1, 3, 16, 224, 224),   # Standard
+    (2, 3, 16, 224, 224),   # Batch 2
+    (4, 3, 16, 224, 224),   # Batch 4
+]
 
-print(f"\nInput shape: ({B}, {C}, {T}, {H}, {W})")
-print(f"Benchmark: {num_runs} runs, {warmup} warmup")
+# =============================================================================
+# Run Benchmarks
+# =============================================================================
 
 results = {}
 
-for name, kwargs in configs:
-    print(f"\n{name}:")
+print("\n" + "=" * 60)
+print("Running benchmarks...")
+print("=" * 60)
+
+for config_name, kwargs in configs:
+    print(f"\n{config_name}:")
+    results[config_name] = {'config': kwargs}
 
     try:
         model = Censor(verbose=False, **kwargs)
         model = model.to(device)
-        model.eval()
 
-        params = sum(p.numel() for p in model.parameters()) / 1e6
-        print(f"  Parameters: {params:.2f}M")
+        # Count parameters
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-        # Warmup
-        video = torch.randn(B, C, T, H, W).to(device)
-        with torch.no_grad():
-            for _ in range(warmup):
-                _ = model(video)
+        results[config_name]['total_params'] = total_params
+        results[config_name]['trainable_params'] = trainable_params
+        results[config_name]['params_m'] = total_params / 1e6
 
-        if device.type == 'cuda':
-            torch.cuda.synchronize()
+        print(f"  Parameters: {total_params/1e6:.2f}M")
 
-        # Benchmark
-        latencies = []
-        with torch.no_grad():
-            for _ in range(num_runs):
-                start = time.perf_counter()
-                _ = model(video)
-                if device.type == 'cuda':
-                    torch.cuda.synchronize()
-                end = time.perf_counter()
-                latencies.append((end - start) * 1000)
+        # Benchmark different batch sizes
+        for batch_size in [1, 2, 4]:
+            input_shape = (batch_size, 3, 16, 224, 224)
+            print(f"  Batch {batch_size}: ", end='', flush=True)
 
-        latencies = np.array(latencies)
+            stats = benchmark_model(model, input_shape, num_runs=100)
 
-        results[name] = {
-            'params': params,
-            'mean_ms': latencies.mean(),
-            'std_ms': latencies.std(),
-            'p50_ms': np.percentile(latencies, 50),
-            'p95_ms': np.percentile(latencies, 95),
-            'throughput': 1000 / latencies.mean(),
-        }
+            results[config_name][f'batch_{batch_size}'] = stats
+            print(f"{stats['mean_ms']:.2f}ms ({stats['throughput_fps']:.1f} fps)")
 
-        if device.type == 'cuda':
-            mem = torch.cuda.max_memory_allocated() / 1024 / 1024
-            results[name]['gpu_mem_mb'] = mem
-            print(f"  GPU Memory: {mem:.1f} MB")
-
-        print(f"  Latency: {latencies.mean():.2f} ± {latencies.std():.2f} ms")
-        print(f"  P95: {np.percentile(latencies, 95):.2f} ms")
-        print(f"  Throughput: {results[name]['throughput']:.1f} fps")
-
+        # Cleanup
         del model
         if device.type == 'cuda':
             torch.cuda.empty_cache()
-            torch.cuda.reset_peak_memory_stats()
 
     except Exception as e:
         print(f"  Error: {e}")
-        results[name] = {'error': str(e)}
+        results[config_name]['error'] = str(e)
 
-# Summary
+# =============================================================================
+# Summary Table
+# =============================================================================
+
 print("\n" + "=" * 60)
-print("Summary")
+print("Summary Table")
 print("=" * 60)
-print(f"{'Config':<25} {'Params':<10} {'Latency':<15} {'Throughput':<12}")
-print("-" * 60)
-for name, r in results.items():
-    if 'mean_ms' in r:
-        print(f"{name:<25} {r['params']:<10.2f} {r['mean_ms']:<15.2f} {r['throughput']:<12.1f}")
 
-# Save
+print(f"{'Config':<30} {'Params':<8} {'Latency':<12} {'Throughput':<12} {'Memory':<10}")
+print("-" * 72)
+
+for name, r in results.items():
+    if 'error' not in r and 'batch_1' in r:
+        b1 = r['batch_1']
+        params = r['params_m']
+        latency = b1['mean_ms']
+        throughput = b1['throughput_fps']
+        memory = b1.get('gpu_memory_max_mb', 0)
+
+        print(f"{name:<30} {params:<8.2f} {latency:<12.2f} {throughput:<12.1f} {memory:<10.1f}")
+
+# =============================================================================
+# Save Results
+# =============================================================================
+
 output_dir = Path(__file__).parent.parent / 'results'
 output_dir.mkdir(exist_ok=True)
 
+output_file = output_dir / 'exp3_latency.json'
+with open(output_file, 'w') as f:
+    json.dump({
+        'date': datetime.now().isoformat(),
+        'device': str(device),
+        'gpu_name': torch.cuda.get_device_name(0) if device.type == 'cuda' else 'CPU',
+        'results': results,
+    }, f, indent=2)
+
+# Also save readable text
 with open(output_dir / 'exp3_latency.txt', 'w') as f:
     f.write(f"Inference Latency Benchmark\n")
     f.write(f"Date: {datetime.now()}\n")
-    f.write(f"Device: {device}\n")
-    f.write(f"Input: ({B}, {C}, {T}, {H}, {W})\n\n")
-    for name, r in results.items():
-        f.write(f"{name}:\n")
-        for k, v in r.items():
-            f.write(f"  {k}: {v}\n")
-        f.write("\n")
+    f.write(f"Device: {device}\n\n")
 
-print(f"\nSaved to: {output_dir / 'exp3_latency.txt'}")
+    f.write(f"{'Config':<30} {'Params':<8} {'B1':<10} {'B2':<10} {'B4':<10}\n")
+    f.write("-" * 70 + "\n")
+
+    for name, r in results.items():
+        if 'error' not in r and 'batch_1' in r:
+            b1 = r['batch_1'].get('mean_ms', 0)
+            b2 = r['batch_2'].get('mean_ms', 0)
+            b4 = r['batch_4'].get('mean_ms', 0)
+            params = r['params_m']
+            f.write(f"{name:<30} {params:<8.2f} {b1:<10.2f} {b2:<10.2f} {b4:<10.2f}\n")
+
+print(f"\nSaved to: {output_file}")
+print(f"Readable: {output_dir / 'exp3_latency.txt'}")

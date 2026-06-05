@@ -697,7 +697,15 @@ These challenging subjects represent \textbf{edge cases} defining the performanc
 
 \item \textbf{Slow Pathway Design}: The current slow pathway design may be suboptimal. Alternative architectures may produce different results.
 
-\item \textbf{Parameter Efficiency}: The architecture contains 68.35M parameters trained on 247 samples (ratio 276,000:1). While this appears extreme, LOSO's subject-level split provides implicit regularization---each fold trains on only 225--239 samples and tests on completely different subjects. The cross-dataset generalization (67--75\%) and consistent ablation rankings across folds suggest the model learns transferable features rather than memorizing training subjects. A parameter reduction experiment (3D ResNet-18 single-pathway, $\sim$14M parameters) achieved 85.76\% accuracy, indicating the full architecture's 2\% improvement requires the additional components (rPPG, CASANet) rather than raw parameter count. Future work should explore knowledge distillation for deployment efficiency.
+\textbf{Parameter Efficiency}: The architecture contains 68.35M parameters trained on 247 samples (ratio 276,000:1). While this appears extreme, two mechanisms prevent overfitting:
+
+\begin{enumerate}
+\item \textbf{Neuron-level Sparse Control}: Censor implements a Long-Term Memory Sparse Control mechanism inspired by synaptic pruning in biological brains. Neurons inactive for $>200$ steps undergo hard freezing (gradient cutoff), while inactive neurons $>100$ steps receive soft weight decay. Reactivated neurons receive growth factor boost (2.0x). This dynamic pruning reduces effective parameter count during training.
+
+\item \textbf{LOSO Protocol}: Each fold trains on only 225--239 samples and tests on completely different subjects, providing implicit regularization through subject-level data splitting.
+\end{enumerate}
+
+The cross-dataset generalization (67--75\%) and consistent ablation rankings across folds suggest the model learns transferable features rather than memorizing training subjects. A parameter reduction experiment (3D ResNet-18 single-pathway, $\sim$14M parameters) achieved 85.76\% accuracy, indicating the full architecture's 2\% improvement requires the additional components (rPPG, CASANet) rather than raw parameter count. Future work should explore knowledge distillation for deployment efficiency.
 \end{enumerate}
 
 \subsection{Positive Aspects of Negative Results}

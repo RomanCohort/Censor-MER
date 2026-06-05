@@ -388,6 +388,7 @@ def experiment_3_latency_benchmark():
         ('Full Model', {}),
         ('Fast-only', {'single_path': 'fast'}),
         ('No-rPPG', {'no_rppg': True}),
+        ('With Sparse Control', {'enable_sparse_control': True}),  # New!
     ]
 
     results = {}

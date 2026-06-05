@@ -306,6 +306,149 @@ def experiment_2_rppg_validation():
 # Experiment 3: Inference Latency Benchmark
 # =============================================================================
 
+# =============================================================================
+# Experiment 4: Sparse Control Statistics
+# =============================================================================
+
+def experiment_4_sparse_control_stats():
+    """
+    Analyze sparse control mechanism to demonstrate parameter efficiency.
+
+    Measures:
+    - Total neurons vs active neurons
+    - Frozen ratio (hard freeze)
+    - Soft frozen ratio
+    - Effective parameter count
+    """
+    print("=" * 60)
+    print("Experiment 4: Sparse Control Statistics")
+    print("=" * 60)
+
+    try:
+        from main import Censor
+        import torch.nn as nn
+    except ImportError as e:
+        print(f"Import error: {e}")
+        return None
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Device: {device}")
+
+    # Create model with sparse control enabled
+    print("\nCreating model with sparse control...")
+    model = Censor(verbose=False, enable_sparse_control=True)
+    model = model.to(device)
+
+    # Count total parameters
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Total parameters: {total_params / 1e6:.2f}M")
+
+    # Simulate training steps to trigger sparse control
+    print("\nSimulating training steps to activate sparse control...")
+    model.train()
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+
+    sparse_stats_history = []
+    num_steps = 300  # Enough to trigger hard freeze
+
+    for step in range(num_steps):
+        video = torch.randn(2, 3, 16, 224, 224).to(device)
+        optimizer.zero_grad()
+        out = model(video)
+        loss = out.sum()  # Dummy loss
+        loss.backward()
+        optimizer.step()
+
+        # Collect sparse stats every 50 steps
+        if step % 50 == 0 and hasattr(model, 'sparse_control') and model.sparse_control:
+            stats = {}
+            for name, ctrl in model.sparse_control.sparse_controllers.items():
+                if hasattr(ctrl, 'get_sparse_stats'):
+                    ctrl_stats = ctrl.get_sparse_stats()
+                    stats[name] = ctrl_stats
+            sparse_stats_history.append((step, stats))
+            print(f"  Step {step}: collected sparse stats")
+
+    # Final statistics
+    print("\n" + "=" * 60)
+    print("Sparse Control Final Statistics")
+    print("=" * 60)
+
+    final_stats = {}
+    if hasattr(model, 'sparse_control') and model.sparse_control:
+        for name, ctrl in model.sparse_control.sparse_controllers.items():
+            if hasattr(ctrl, 'get_sparse_stats'):
+                final_stats[name] = ctrl.get_sparse_stats()
+
+    # Calculate effective parameters
+    total_neurons = 0
+    active_neurons = 0
+    frozen_neurons = 0
+
+    for name, stats in final_stats.items():
+        frozen_ratio = stats.get('frozen_ratio', 0)
+        usage_mean = stats.get('usage_mean', 0)
+
+        # Estimate neurons from config
+        if 'fast' in name:
+            neurons = 512
+        elif 'slow' in name:
+            neurons = 768
+        else:
+            neurons = 1024
+
+        total_neurons += neurons
+        frozen_neurons += int(neurons * frozen_ratio)
+        active_neurons += int(neurons * (1 - frozen_ratio))
+
+        print(f"\n{name}:")
+        print(f"  Neurons: {neurons}")
+        print(f"  Frozen ratio: {frozen_ratio*100:.1f}%")
+        print(f"  Usage mean: {usage_mean:.3f}")
+        print(f"  Active neurons: ~{int(neurons * (1-frozen_ratio))}")
+
+    # Effective parameter estimate
+    active_ratio = active_neurons / total_neurons if total_neurons > 0 else 1.0
+    effective_params = total_params * active_ratio
+
+    print("\n" + "-" * 60)
+    print("Summary:")
+    print(f"  Total neurons tracked: {total_neurons}")
+    print(f"  Hard frozen neurons: {frozen_neurons} ({frozen_neurons/total_neurons*100:.1f}%)")
+    print(f"  Active neurons: {active_neurons} ({active_ratio*100:.1f}%)")
+    print(f"  Total parameters: {total_params/1e6:.2f}M")
+    print(f"  Effective parameters: ~{effective_params/1e6:.2f}M (estimated)")
+    print("-" * 60)
+
+    # Save results
+    output_dir = Path(__file__).parent.parent / 'results'
+    output_dir.mkdir(exist_ok=True)
+
+    with open(output_dir / 'sparse_control_stats.txt', 'w') as f:
+        f.write(f"Sparse Control Statistics\n")
+        f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        f.write(f"Total parameters: {total_params/1e6:.2f}M\n")
+        f.write(f"Total neurons tracked: {total_neurons}\n")
+        f.write(f"Hard frozen neurons: {frozen_neurons} ({frozen_neurons/total_neurons*100:.1f}%)\n")
+        f.write(f"Active neurons: {active_neurons} ({active_ratio*100:.1f}%)\n")
+        f.write(f"Effective parameters: ~{effective_params/1e6:.2f}M\n\n")
+
+        f.write("Per-stage statistics:\n")
+        for name, stats in final_stats.items():
+            f.write(f"\n{name}:\n")
+            for k, v in stats.items():
+                f.write(f"  {k}: {v}\n")
+
+    print(f"\nResults saved to: {output_dir / 'sparse_control_stats.txt'}")
+
+    return {
+        'total_params': total_params,
+        'effective_params': effective_params,
+        'frozen_ratio': frozen_neurons / total_neurons if total_neurons > 0 else 0,
+        'active_ratio': active_ratio,
+    }
+
+
 def experiment_3_latency_benchmark():
     """
     Benchmark inference latency for deployment guidance.
@@ -484,7 +627,7 @@ def experiment_3_latency_benchmark():
 def main():
     parser = argparse.ArgumentParser(description='AutoDL Experiments for Paper Revision')
     parser.add_argument('--exp', type=str, default='all',
-                        choices=['1', '2', '3', 'all'],
+                        choices=['1', '2', '3', '4', 'all'],
                         help='Experiment to run')
     args = parser.parse_args()
 
@@ -506,6 +649,10 @@ def main():
 
     if args.exp in ['3', 'all']:
         results['exp3'] = experiment_3_latency_benchmark()
+        print()
+
+    if args.exp in ['4', 'all']:
+        results['exp4'] = experiment_4_sparse_control_stats()
         print()
 
     print("=" * 60)

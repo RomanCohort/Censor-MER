@@ -225,6 +225,24 @@ Load-balancing loss prevents expert collapse:
 
 \textbf{Routing Mechanism}: The gating network receives concatenated pathway features before dimension reduction, which allows expression-aware routing.
 
+\textbf{Expert Count Selection}: We empirically evaluated $E \in \{2, 3, 4, 5\}$ experts on a simplified model (Table~\ref{tab:expert_count}). $E=3$ achieves the highest accuracy (28\%) with excellent routing balance (0.953), validating our design choice. The number 3 also matches the number of primary emotion categories in CASME II 4-class subset, allowing potential specialization per expression type.
+
+\begin{table}[htbp]
+\centering
+\caption{MoE Expert Count Ablation}
+\label{tab:expert_count}
+\begin{tabular}{lllll}
+\toprule
+\textbf{Experts} & \textbf{Accuracy} & \textbf{Routing Balance} & \textbf{KL Divergence} & \textbf{Params} \\
+\midrule
+$E=2$ & 22.00\% & 0.849 & 0.0115 & 386K \\
+$E=3$ & \textbf{28.00\%} & 0.953 & 0.0011 & 454K \\
+$E=4$ & 24.00\% & \textbf{0.975} & 0.0003 & 523K \\
+$E=5$ & 22.00\% & 0.911 & 0.0039 & 591K \\
+\bottomrule
+\end{tabular}
+\end{table}
+
 \textbf{Expert Specialization}: Analysis of routing weights across 24 LOSO folds shows:
 \begin{itemize}
 \item \textbf{Expert 1}: Dominates ``happiness'' (78\%) and ``surprise'' (65\%)

@@ -1,0 +1,74 @@
+# Experiments Checklist for Paper
+# =================================
+# Run these experiments on AutoDL and update paper with results
+#
+# Data paths:
+#   CASME II: /root/autodl-tmp/data/CASME2
+#   SMIC: /root/SMIC_all_cropped
+#   SAMM: /root/data/SAMM/SAMM
+#
+# Usage:
+#   git pull
+#   bash experiments/run_all.sh
+# =================================
+
+## Experiment 1: OFF-ApexNet LOSO (Architecture Validation)
+# Output: results/exp1_offapexnet_casme2.json
+# Purpose: SOTA fair comparison
+# Paper section: Section 5 (Results)
+python experiments/exp1_offapexnet.py --dataset casme2
+
+## Experiment 2: rPPG Signal Quality
+# Output: results/exp2_rppg_validation.json
+# Purpose: Validate +10.76% rPPG contribution
+# Paper section: Section 5.3 (Ablation)
+python experiments/exp2_rppg_validation.py
+
+## Experiment 3: Inference Latency
+# Output: results/exp3_latency.json, results/exp3_latency.txt
+# Purpose: Deployment guidance
+# Paper section: Section 5.5 (Efficiency)
+python experiments/exp3_latency.py
+
+## Experiment 4: Sparse Control Statistics
+# Output: results/exp4_sparse_control.json, results/exp4_sparse_control.txt
+# Purpose: Parameter efficiency (68M params / 247 samples)
+# Paper section: Section 6 (Limitations - Parameter Efficiency)
+python experiments/exp4_sparse_control.py
+
+## Experiment 5: Training Curves + Expert Specialization
+# Output: results/exp5_training_curves.json
+# Purpose:
+#   - Training convergence (no overfitting)
+#   - Expert specialization validation (KL divergence)
+# Paper section: Section 5.1 (Training Convergence)
+python experiments/exp5_training_curves.py
+
+## Generate Figures
+# Run after exp5 completes
+python experiments/generate_training_plots.py
+
+# =================================
+# After experiments, update paper:
+# =================================
+
+## Training Curves (Section 5.1)
+# - Replace figures/training_curves.png with real plot
+# - Update: "Training loss decreases from X to Y" (real values)
+# - Update: "Validation accuracy plateaus at X epochs"
+
+## Expert Specialization (Section 4.2)
+# - Replace figures/expert_routing_validation.png with real plot
+# - Update: "Average KL divergence = X" (from exp5 results)
+
+## Computational Resources (Section 4.3)
+# - Update: "Training time: ~X min/fold" (real timing)
+# - Update: "GPU memory: Peak XGB" (real memory)
+# - Update: "Total: ~Xh for 24 folds"
+
+## Sparse Control (Section 6)
+# - Update: "Frozen ratio: X%" (from exp4 results)
+# - Update: "Effective params: ~XM" (from exp4 results)
+
+## Latency (Section 5.5)
+# - Update table with real latency values (from exp3 results)

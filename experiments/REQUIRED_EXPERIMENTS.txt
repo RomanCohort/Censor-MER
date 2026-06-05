@@ -1,0 +1,99 @@
+# Required Experiments for Revision
+# =================================
+# Based on 4 reviewers' feedback, these experiments are needed:
+#
+# Priority:
+#   HIGH = Must do (affects main claims)
+#   MEDIUM = Should do (strengthens paper)
+#   LOW = Nice to have (optional)
+# =================================
+
+## HIGH PRIORITY
+
+### Exp 1: OFF-ApexNet Reproduction (R2)
+# Purpose: Fair SOTA comparison
+# Script: experiments/exp1_offapexnet.py
+# Output: results/exp1_offapexnet_casme2.json
+# Paper section: Section 5 (Results)
+# Note: Use same LOSO protocol, report 24-fold mean
+python experiments/exp1_offapexnet.py --dataset casme2
+
+### Exp 5: Training Curves + Expert Specialization (R1, R2)
+# Purpose:
+#   - Show no overfitting (training/validation curves)
+#   - Validate expert specialization (KL divergence vs random)
+# Script: experiments/exp5_training_curves.py
+# Output: results/exp5_training_curves.json
+# Paper section: Section 5.1 (Training Convergence), Section 4.2 (MoE)
+python experiments/exp5_training_curves.py
+
+## MEDIUM PRIORITY
+
+### Exp 3: Latency Benchmark (for deployment section)
+# Purpose: Deployment guidance
+# Script: experiments/exp3_latency.py
+# Output: results/exp3_latency.json
+# Paper section: Section 5.5 (Efficiency)
+python experiments/exp3_latency.py
+
+### Exp 4: Sparse Control Statistics (R1, R2 - parameter efficiency)
+# Purpose: Justify 68M params / 247 samples
+# Script: experiments/exp4_sparse_control.py
+# Output: results/exp4_sparse_control.json
+# Paper section: Section 6 (Limitations)
+python experiments/exp4_sparse_control.py
+
+## NEW: MoE Expert Count Ablation (R1)
+
+### Exp 6: MoE Expert Count Ablation
+# Purpose: Justify E=3 experts
+# Need to test: E=2, E=3, E=4, E=5
+# Script: experiments/exp6_moe_ablation.py (NEW - will create)
+# Output: results/exp6_moe_ablation.json
+# Paper section: Section 4.2 (MoE Gating)
+python experiments/exp6_moe_ablation.py
+
+## LOW PRIORITY (optional)
+
+### Exp 7: Challenging Folds Analysis (R2)
+# Purpose: Quantitative analysis of failure cases
+# Script: experiments/exp7_failure_analysis.py (optional)
+# Requires: Intensity/duration annotations (not in CASME II)
+# Status: DEFERRED - annotations not available
+
+# =================================
+# Run Order (on AutoDL)
+# =================================
+
+# Step 1: Pull latest code
+git pull
+
+# Step 2: Run experiments (can run in parallel)
+bash experiments/run_all.sh           # Runs 1, 3, 4, 5
+python experiments/exp6_moe_ablation.py  # Run separately (needs new script)
+
+# Step 3: Generate figures
+python experiments/generate_training_plots.py
+
+# Step 4: Update paper values
+python experiments/update_paper_from_results.py
+
+# =================================
+# After experiments, update paper:
+# =================================
+
+# Section 4.2 (MoE):
+# - Update expert routing figure (from exp5)
+# - Add KL divergence value (from exp5)
+# - Add E=2,3,4,5 comparison (from exp6)
+
+# Section 5.1 (Training Convergence):
+# - Add training curves figure (from exp5)
+# - Update loss/accuracy values (from exp5)
+
+# Section 5 (Results):
+# - Add OFF-ApexNet comparison (from exp1)
+
+# Section 6 (Limitations):
+# - Update frozen ratio (from exp4)
+# - Update effective params (from exp4)

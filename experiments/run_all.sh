@@ -2,14 +2,20 @@
 # =============================================================================
 # Run All Experiments (Parallel Version)
 # =============================================================================
-# Usage:
-#   bash experiments/run_all.sh          # Run all 4 experiments
-#   bash experiments/run_all.sh 1 3 4    # Run specific experiments
+# Based on reviewer feedback, run these experiments:
 #
-# NOTE: Exp 2 (rPPG validation) removed - ME time window too short
+# Exp 1: OFF-ApexNet reproduction (R2 - fair SOTA comparison)
+# Exp 3: Latency benchmark (deployment guidance)
+# Exp 4: Sparse control statistics (parameter efficiency)
+# Exp 5: Training curves + Expert specialization (R1, R2)
+# Exp 6: MoE expert count ablation (R1 - justify E=3)
+#
+# Usage:
+#   bash experiments/run_all.sh          # Run all 5 experiments
+#   bash experiments/run_all.sh 1 5 6    # Run specific experiments
 # =============================================================================
 
-EXPS=${@:-"1 3 4 5"}
+EXPS=${@:-"1 3 4 5 6"}
 LOG_DIR="results/logs"
 mkdir -p $LOG_DIR
 
@@ -40,8 +46,12 @@ for exp in $EXPS; do
             echo ">>> Exp 5: Training Curves (background)"
             nohup python experiments/exp5_training_curves.py > $LOG_FILE 2>&1 &
             ;;
+        6)
+            echo ">>> Exp 6: MoE Expert Ablation (background)"
+            nohup python experiments/exp6_moe_ablation.py > $LOG_FILE 2>&1 &
+            ;;
         *)
-            echo "Unknown: $exp (valid: 1, 3, 4, 5)"
+            echo "Unknown: $exp (valid: 1, 3, 4, 5, 6)"
             ;;
     esac
     echo "    Log: $LOG_FILE"
@@ -55,4 +65,4 @@ echo "=============================================="
 
 # Show running processes
 sleep 2
-ps aux | grep "exp[1-5]" | grep -v grep
+ps aux | grep "exp[1-6]" | grep -v grep

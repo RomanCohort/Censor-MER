@@ -18,11 +18,10 @@
 # Paper section: Section 5 (Results)
 python experiments/exp1_offapexnet.py --dataset casme2
 
-## Experiment 2: rPPG Signal Quality
-# Output: results/exp2_rppg_validation.json
-# Purpose: Validate +10.76% rPPG contribution
-# Paper section: Section 5.3 (Ablation)
-python experiments/exp2_rppg_validation.py
+## NOTE: Exp 2 (rPPG Validation) REMOVED
+# rPPG cannot be validated in ME time windows (40-200ms < 200ms minimum for HR)
+# Contribution justified through ablation study (+10.76% with p<0.004)
+# See paper Section 4.4 for limitation discussion
 
 ## Experiment 3: Inference Latency
 # Output: results/exp3_latency.json, results/exp3_latency.txt

@@ -270,7 +270,15 @@ In a sliding window $W$ ($\geq$40 frames):
 
 \textbf{Stage 3: Bandpass Filtering.} The standard deviation ratio ($\sigma_x/\sigma_y$) is the core innovation of CHROM, dynamically normalizing the two chrominance signals to separate the blood volume pulse from motion artifacts. We use a sliding window of 40 frames ($\sim$200ms at 200fps) for robust standard deviation estimation. Temporal bandpass filtering (0.5--4.0 Hz) extracts heart rate signals correlated with emotional arousal.
 
-\textbf{Signal Quality}: CHROM-based rPPG extraction has demonstrated reliable performance in prior literature \cite{dehaan2013robust}, with reported mean absolute error of approximately 2 BPM for heart rate estimation under controlled recording conditions. Given CASME II's standardized recording setup (200 fps, frontal view, consistent illumination), we expect comparable signal quality. The extracted signals provide chromatic features that correlate with expressions, complementing appearance and motion features. Note that ME duration (40--200ms) is shorter than typical rPPG windows, so physiological interpretability is limited (see Limitations). Figure~\ref{fig:rppg_pipeline} illustrates the three-stage CHROM extraction pipeline.
+\textbf{Signal Quality}: CHROM-based rPPG extraction has demonstrated reliable performance in prior literature \cite{dehaan2013robust}, with reported mean absolute error of approximately 2 BPM for heart rate estimation under controlled recording conditions. However, \textbf{ME duration (40--200ms = 8--40 frames at 200fps) is fundamentally shorter than the minimum rPPG window required for stable HR estimation (40+ frames, $\sim$200ms)}. This temporal mismatch means:
+
+\begin{enumerate}
+\item \textbf{Physiological interpretability is limited}: We cannot validate rPPG signals via heart rate estimation within ME time windows
+\item \textbf{Contribution mechanism is indirect}: The +10.76\% accuracy improvement likely comes from chromatic features correlated with expression intensity (blood flow changes during facial muscle activation), not validated cardiac signals
+\item \textbf{Empirical justification}: The contribution is demonstrated through ablation study (Section 5.3), where removing rPPG causes statistically significant accuracy drop ($p<0.004$)
+\end{enumerate}
+
+We acknowledge this limitation and encourage future work to explore whether rPPG features capture expression-specific chromatic patterns or merely provide noise regularization. Figure~\ref{fig:rppg_pipeline} illustrates the extraction pipeline, noting that the 40-frame window exceeds typical ME duration.
 
 \begin{figure}[htbp]
 \centering

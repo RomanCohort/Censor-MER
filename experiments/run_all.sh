@@ -3,11 +3,13 @@
 # Run All Experiments (Parallel Version)
 # =============================================================================
 # Usage:
-#   bash experiments/run_all.sh          # Run all 5 experiments
+#   bash experiments/run_all.sh          # Run all 4 experiments
 #   bash experiments/run_all.sh 1 3 4    # Run specific experiments
+#
+# NOTE: Exp 2 (rPPG validation) removed - ME time window too short
 # =============================================================================
 
-EXPS=${@:-"1 2 3 4 5"}
+EXPS=${@:-"1 3 4 5"}
 LOG_DIR="results/logs"
 mkdir -p $LOG_DIR
 
@@ -26,10 +28,6 @@ for exp in $EXPS; do
             echo ">>> Exp 1: OFF-ApexNet (background)"
             nohup python experiments/exp1_offapexnet.py > $LOG_FILE 2>&1 &
             ;;
-        2)
-            echo ">>> Exp 2: rPPG Validation (background)"
-            nohup python experiments/exp2_rppg_validation.py > $LOG_FILE 2>&1 &
-            ;;
         3)
             echo ">>> Exp 3: Latency Benchmark (background)"
             nohup python experiments/exp3_latency.py > $LOG_FILE 2>&1 &
@@ -43,7 +41,7 @@ for exp in $EXPS; do
             nohup python experiments/exp5_training_curves.py > $LOG_FILE 2>&1 &
             ;;
         *)
-            echo "Unknown: $exp"
+            echo "Unknown: $exp (valid: 1, 3, 4, 5)"
             ;;
     esac
     echo "    Log: $LOG_FILE"

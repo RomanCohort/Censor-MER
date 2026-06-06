@@ -258,20 +258,24 @@ ExpertGates:       (B, 3)       ← top-2 softmax
 
 ### Accuracy Comparison on Standard Benchmarks
 
-| Method | Backbone | CASME II | SAMM | SMIC | CAS(ME)² |
-|--------|----------|---------|------|------|--------|
-| **Hybrid Attention-3DNet** (JJCIT 2025) | 3D CNN + SE | 93.79% | 93.61% | 93.42% | **93.95%** |
-| **ROI-ArcFace** (IEEE 2025) | CNN + ROI | **93.96%** | 86.15% | 81.17% | — |
-| **STRNet** (Int. J. SCC 2025) | Region-based | — | — | — | UF1=0.9792 |
-| **GAM-MER** (Heliyon 2024) | Graph Attn + Transf | 91.57% | 91.25% | 86.22% | — |
-| **MCCA-VNet** (PMC 2024) | ViT + XCiT + CBAM | — | — | — | UF1=0.868 |
-| **SelfME** (IEEE 2024) | Transformer | 90.78% | — | 69.70% | — |
-| **μ-BERT** (ACM MM 2024) | BERT-style | 90.34% | — | 85.80% | — |
-| **Dual-Branch Cross-Attn** (2024) | Swin + MobileViT | — | — | — | 81.6% |
-| **Multi-scale 3D ResNet** (J. Image 2024) | 3D-ResNet50 | 91.35% | 84.77% | 74.6% | — |
-| **LAENet** (OA 2024) | Lightweight 3D CNN | 79.19% | — | — | — |
-| **OFF-ApexNet** (baseline) | CNN | 87.64% | 54.09% | 68.17% | — |
-| **LBP-TOP** (baseline) | Handcrafted | 70.26% | 39.54% | 20.00% | — |
+**Note**: Some recent 2025 publications claim higher accuracy (93-94%) including Hybrid Attention-3DNet (JJCIT 2025: 93.79%) and ROI-ArcFace (IEEE 2025: 93.96%). These are included in the annotated bibliography but require verification through reproducible code and peer-reviewed confirmation. We position Censor against established, verified baselines while acknowledging higher claims in recent literature.
+
+| Method | Backbone | CASME II | SAMM | SMIC | CAS(ME)² | Verification |
+|--------|----------|---------|------|------|----------|--------------|
+| **Multi-scale 3D ResNet** (Neurocomputing 2024) | 3D-ResNet50 | 91.35% | 84.77% | 74.6% | — | ✅ DOI verified |
+| **GAM-MER** (Heliyon 2024) | Graph Attn + Transf | 91.57% | 91.25% | 86.22% | — | ⚠️ Paper verified |
+| **SelfME** (Pattern Recognition Letters 2024) | Transformer | 90.78% | — | 69.70% | — | ✅ Verified |
+| **μ-BERT** (ACM MM 2024) | BERT-style | 90.34% | — | 85.80% | — | ✅ Verified |
+| **MCCA-VNet** (Eng. Applications of AI 2024) | ViT + XCiT + CBAM | — | — | — | UF1=0.868 | ⚠️ Paper verified |
+| **Dual-Branch Cross-Attn** (2024) | Swin + MobileViT | — | — | — | 81.6% | ⚠️ Verify source |
+| **OFF-ApexNet** (baseline) | CNN | 87.64% | 54.09% | 68.17% | — | ✅ Established baseline |
+| **LAENet** (OA 2024) | Lightweight 3D CNN | 79.19% | — | — | — | ⚠️ Verify source |
+| **LBP-TOP** (baseline) | Handcrafted | 70.26% | 39.54% | 20.00% | — | ✅ Established baseline |
+
+**Unverified Claims** (excluded pending verification):
+- Hybrid Attention-3DNet (JJCIT 2025): Claims 93.79% CASME II, 93.61% SAMM, 93.42% SMIC, 93.95% CAS(ME)²
+- ROI-ArcFace (IEEE 2025): Claims 93.96% CASME II, 86.15% SAMM, 81.17% SMIC
+- STRNet (Int. J. SCC 2025): Claims UF1=0.9792 on CAS(ME)²
 
 ### Censor's Design Rationale vs SOTA
 

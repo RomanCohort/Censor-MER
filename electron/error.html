@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Censor - 错误</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: white;
+        }
+
+        .container {
+            text-align: center;
+            padding: 2rem;
+            max-width: 600px;
+        }
+
+        .icon {
+            font-size: 4rem;
+            margin-bottom: 1rem;
+        }
+
+        h1 {
+            font-size: 2rem;
+            margin-bottom: 1rem;
+            font-weight: 300;
+        }
+
+        .error-box {
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 8px;
+            padding: 1rem;
+            margin: 1.5rem 0;
+            text-align: left;
+            font-family: monospace;
+            font-size: 0.9rem;
+            word-break: break-all;
+        }
+
+        .help {
+            text-align: left;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            padding: 1rem;
+            margin: 1.5rem 0;
+        }
+
+        .help h3 {
+            margin-bottom: 0.5rem;
+        }
+
+        .help ul {
+            padding-left: 1.5rem;
+        }
+
+        .help li {
+            margin: 0.5rem 0;
+        }
+
+        .btn {
+            display: inline-block;
+            padding: 12px 24px;
+            background: white;
+            color: #e74c3c;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            cursor: pointer;
+            text-decoration: none;
+            margin: 0.5rem;
+        }
+
+        .btn:hover {
+            opacity: 0.9;
+        }
+
+        .btn-secondary {
+            background: transparent;
+            border: 2px solid white;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="icon">⚠️</div>
+        <h1>启动失败</h1>
+        <p>无法启动 Streamlit 后端服务</p>
+
+        <div class="error-box" id="error-message">
+            检测错误中...
+        </div>
+
+        <div class="help">
+            <h3>可能的原因：</h3>
+            <ul>
+                <li>未安装 Streamlit：运行 <code>pip install streamlit</code></li>
+                <li>未安装项目依赖：运行 <code>pip install -r requirements.txt</code></li>
+                <li>Python 环境未正确配置</li>
+                <li>端口 7860 被占用</li>
+            </ul>
+        </div>
+
+        <div>
+            <button class="btn" onclick="location.reload()">🔄 重试</button>
+            <button class="btn btn-secondary" onclick="require('electron').shell.openExternal('http://localhost:7860')">打开浏览器</button>
+        </div>
+    </div>
+</body>
+</html>

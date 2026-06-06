@@ -1,0 +1,70 @@
+{
+  "summary": {
+    "snn": {
+      "fid_mean": NaN,
+      "fid_std": NaN,
+      "au_acc_mean": 1.0,
+      "temporal_mean": 0.9402113547548652,
+      "ssim_mean": 0.09833675064146519
+    },
+    "event": {
+      "fid_mean": NaN,
+      "fid_std": NaN,
+      "au_acc_mean": 1.0,
+      "temporal_mean": 0.9407975967973471,
+      "ssim_mean": 0.09857461303472519,
+      "events_mean": 62.7
+    },
+    "baselines": {
+      "random": {
+        "fid_mean": NaN,
+        "temporal_mean": 0.8871535319834948,
+        "ssim_mean": 0.782792603969574
+      },
+      "linear": {
+        "fid_mean": NaN,
+        "temporal_mean": 0.9360325939953327,
+        "ssim_mean": 0.9905156910419464
+      },
+      "sigmoid": {
+        "fid_mean": NaN,
+        "temporal_mean": 0.9698064497672021,
+        "ssim_mean": 0.9272052943706512
+      }
+    }
+  },
+  "emotion_summary": {
+    "happiness": {
+      "fid_mean": NaN,
+      "fid_std": NaN,
+      "count": 5
+    },
+    "surprise": {
+      "fid_mean": NaN,
+      "fid_std": NaN,
+      "count": 5
+    },
+    "disgust": {
+      "fid_mean": NaN,
+      "fid_std": NaN,
+      "count": 5
+    },
+    "repression": {
+      "fid_mean": NaN,
+      "fid_std": NaN,
+      "count": 5
+    }
+  },
+  "config": {
+    "num_samples": 20,
+    "num_frames": 16,
+    "image_size": 224,
+    "methods": [
+      "snn",
+      "event",
+      "random",
+      "linear",
+      "sigmoid"
+    ]
+  }
+}

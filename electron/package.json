@@ -1,22 +1,26 @@
 {
-  "name": "Censor",
+  "name": "Censor-Feedback",
   "version": "1.0.0",
-  "description": "Biomimetic Dual-Pathway Micro-Expression Recognition System",
+  "description": "微表情反馈收集系统 - 简洁选择式界面（嵌入Python）",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "setup-python": "setup_embedded_python.bat",
     "build": "electron-builder --win",
+    "build:full": "npm run setup-python && npm run build",
+    "build:mac": "electron-builder --mac",
+    "build:linux": "electron-builder --linux",
     "pack": "electron-builder --dir"
   },
-  "author": "Your Name",
+  "author": "Censor Team",
   "license": "Apache-2.0",
   "devDependencies": {
     "electron": "^28.0.0",
     "electron-builder": "^24.9.1"
   },
   "build": {
-    "appId": "com.censor.app",
-    "productName": "Censor",
+    "appId": "com.censor.feedback",
+    "productName": "Censor 微表情反馈",
     "directories": {
       "output": "dist"
     },
@@ -25,29 +29,65 @@
         {
           "target": "nsis",
           "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
         }
       ],
       "icon": "icon.ico"
     },
+    "mac": {
+      "target": "dmg",
+      "icon": "icon.icns"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "icon.png"
+    },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "icon.ico",
+      "uninstallerIcon": "icon.ico",
+      "installerHeaderIcon": "icon.ico",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Censor 微表情反馈"
     },
     "files": [
       "main.js",
       "preload.js",
-      "**/*.html",
-      "**/*.css",
-      "**/*.js",
-      "package.json"
+      "*.html",
+      "icon.*",
+      "!embedded/python_embed.zip",
+      "!embedded/get-pip.py"
     ],
     "extraResources": [
       {
-        "from": "../censor",
-        "to": "censor",
-        "filter": [
-          "**/*"
-        ]
+        "from": "embedded",
+        "to": "embedded",
+        "filter": ["**/*", "!*.zip", "!*.pyc"]
+      },
+      {
+        "from": "../interface",
+        "to": "interface",
+        "filter": ["**/*.py"]
+      },
+      {
+        "from": "../model",
+        "to": "model",
+        "filter": ["**/*.py"]
+      },
+      {
+        "from": "../config",
+        "to": "config",
+        "filter": ["**/*.py", "**/*.yaml"]
+      },
+      {
+        "from": "../feedback_data",
+        "to": "feedback_data",
+        "filter": ["**/*"]
       }
     ]
   }

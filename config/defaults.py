@@ -146,7 +146,7 @@ LLM_CONFIG = {
     'text_embed_dim': 256,
     'max_report_len': 128,
     # DeepSeek API configuration
-    'deepseek_api_key': 'sk-9ae76c2d548c4d64a1a8220e0931b448',
+    'deepseek_api_key': 'YOUR_API_KEY_HERE',
     'deepseek_model': 'deepseek-chat',
     'deepseek_base_url': 'https://api.deepseek.com/v1',
     # AU mapping table (FACS standard)

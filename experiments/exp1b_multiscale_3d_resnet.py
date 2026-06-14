@@ -468,9 +468,20 @@ def main():
         return
     print(f"Data root: {data_root}")
 
-    # Get LOSO splits
-    print("\nBuilding LOSO splits...")
-    splits, num_subjects, full_dataset = get_loso_splits(args.dataset, data_root)
+    # Try preextracted dataset first (much faster, no JPEG decoding)
+    preextract_path = Path(data_root) / 'preextracted.npz'
+    if preextract_path.exists():
+        print(f"\nUsing pre-extracted data: {preextract_path}")
+        from experiments.preextracted_dataset import PreextractedDataset, build_loso_splits
+        full_dataset = PreextractedDataset(str(preextract_path))
+        splits, subjects = build_loso_splits(full_dataset)
+        num_subjects = len(subjects)
+        # Fix: splits now returns (train_idx, test_idx, subj) tuples
+    else:
+        print("\n[WARNING] No preextracted.npz found. Using slow JPEG loading.")
+        print("  Run 'python experiments/preextract_frames.py --dataset casme2' first!")
+        print("  Falling back to FrameSequenceDataset...")
+        splits, num_subjects, full_dataset = get_loso_splits(args.dataset, data_root)
     print(f"Total subjects: {num_subjects}, total folds: {len(splits)}")
 
     if args.quick_test:

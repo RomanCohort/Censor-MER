@@ -4,19 +4,30 @@ Loads from preextracted.npz instead of JPEG frames -- eliminates CPU bottleneck.
 """
 
 import numpy as np
+import pandas as pd
 import torch
 from torch.utils.data import Dataset, Subset
 from pathlib import Path
 
 
 class PreextractedDataset(Dataset):
-    """Load pre-extracted frames from .npz file. Zero JPEG decoding overhead."""
+    """Load pre-extracted frames from .npz file. Zero JPEG decoding overhead.
+
+    Compatible with existing experiment scripts: has .samples (DataFrame) and
+    __getitem__ returns (video_tensor, label) like FrameSequenceDataset.
+    """
 
     def __init__(self, npz_path):
         data = np.load(npz_path, allow_pickle=True)
         self.frames = data['frames']    # (N, C, T, H, W) float32
         self.labels = data['labels']    # (N,) int64
         self.subjects = list(data['subjects'])  # (N,) str
+
+        # Build .samples DataFrame for compatibility with get_loso_splits()
+        self.samples = pd.DataFrame({
+            'subject': self.subjects,
+            'me_label': self.labels.tolist(),
+        })
 
         print(f"[PreextractedDataset] Loaded {len(self.labels)} samples from {npz_path}")
         print(f"  frames shape: {self.frames.shape}")

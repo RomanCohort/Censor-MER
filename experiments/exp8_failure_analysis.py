@@ -81,6 +81,14 @@ def _prepare_input(x):
 
 
 def get_dataset(dataset_name, data_root):
+    """Load dataset. Prefer preextracted.npz if available (much faster)."""
+    preextract_path = Path(data_root) / 'preextracted.npz'
+    if preextract_path.exists():
+        from experiments.preextracted_dataset import PreextractedDataset
+        print(f"[get_dataset] Using pre-extracted data: {preextract_path}")
+        return PreextractedDataset(str(preextract_path))
+
+    print(f"[get_dataset] No preextracted.npz found, using slow JPEG loading.")
     if dataset_name == 'casme2':
         from dataset_frames import FrameSequenceDataset
         return FrameSequenceDataset(data_root, split='train', face_align=False)

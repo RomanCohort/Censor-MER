@@ -1,15 +1,13 @@
 #!/bin/bash
 # =============================================================================
-# Run All Supplementary Experiments on AutoDL (RTX 4090)
+# CENSOR Supplementary Experiments - FULL RUN on AutoDL RTX 4090
 # =============================================================================
-# Estimated time: ~20 hours total
-# Estimated cost: ~40 RMB (2 RMB/h for RTX 4090)
+# Step 1: Pre-extract frames (once, ~10min per dataset)
+# Step 2: Train all experiments (~20h total)
 #
 # Usage:
-#   cd /root/your_censor_repo
-#   git pull
-#   nohup bash experiments/run_supplementary.sh > supplementary_experiments.log 2>&1 &
-#   tail -f supplementary_experiments.log
+#   nohup bash experiments/run_supplementary.sh > run_all.log 2>&1 &
+#   tail -f run_all.log
 # =============================================================================
 
 set -e
@@ -20,180 +18,106 @@ echo "Date: $(date)"
 echo "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'N/A')"
 echo "=========================================="
 
-# Check data paths
-CASME2="/root/autodl-tmp/data/CASME2"
-SAMM="/root/data/SAMM/SAMM"
-SMIC="/root/SMIC_all_cropped"
-
-for path in "$CASME2" "$SAMM" "$SMIC"; do
-    if [ -d "$path" ]; then
-        echo "[OK] Data found: $path"
-    else
-        echo "[WARNING] Data NOT found: $path"
-    fi
-done
-
-# Create results directory
 mkdir -p results
 
 # =============================================================================
-# P0: Multi-scale 3D ResNet LOSO Reproduction (Most Important!)
+# Step 1: Pre-extract frames (eliminates CPU JPEG decoding bottleneck)
 # =============================================================================
-# Expected time: ~4h on 4090
-# If this shows 85-88% instead of claimed 91.35%, our 87.74% is competitive!
-
 echo ""
 echo "=========================================="
-echo "P0: Multi-scale 3D ResNet LOSO Reproduction"
+echo "Step 1: Pre-extracting frames"
 echo "=========================================="
-echo "Start time: $(date)"
 
+python experiments/preextract_frames.py --dataset casme2
+python experiments/preextract_frames.py --dataset samm
+python experiments/preextract_frames.py --dataset smic
+
+echo "Pre-extraction done: $(date)"
+
+# =============================================================================
+# Step 2: Run all experiments
+# =============================================================================
+
+# P0: Multi-scale 3D ResNet LOSO (Most Important! ~4h)
+echo ""
+echo "=========================================="
+echo "[1/7] Multi-scale 3D ResNet - CASME II"
+echo "=========================================="
 python experiments/exp1b_multiscale_3d_resnet.py \
-    --dataset casme2 \
-    --epochs 50 \
-    --pretrained \
-    --batch_size 8 \
-    2>&1 | tee -a results/exp1b_casme2.log
+    --dataset casme2 --epochs 50 --pretrained --batch_size 8 \
+    2>&1 | tee results/exp1b_casme2.log
+echo "[1/7] Done: $(date)"
 
-echo "CASME2 done: $(date)"
-
+echo ""
+echo "=========================================="
+echo "[2/7] Multi-scale 3D ResNet - SAMM"
+echo "=========================================="
 python experiments/exp1b_multiscale_3d_resnet.py \
-    --dataset samm \
-    --epochs 50 \
-    --pretrained \
-    --batch_size 8 \
-    2>&1 | tee -a results/exp1b_samm.log
+    --dataset samm --epochs 50 --pretrained --batch_size 8 \
+    2>&1 | tee results/exp1b_samm.log
+echo "[2/7] Done: $(date)"
 
-echo "SAMM done: $(date)"
-
+echo ""
+echo "=========================================="
+echo "[3/7] Multi-scale 3D ResNet - SMIC"
+echo "=========================================="
 python experiments/exp1b_multiscale_3d_resnet.py \
-    --dataset smic \
-    --epochs 50 \
-    --pretrained \
-    --num_classes 3 \
-    --batch_size 8 \
-    2>&1 | tee -a results/exp1b_smic.log
+    --dataset smic --epochs 50 --pretrained --num_classes 3 --batch_size 8 \
+    2>&1 | tee results/exp1b_smic.log
+echo "[3/7] Done: $(date)"
 
-echo "SMIC done: $(date)"
-
-# =============================================================================
-# P0: Cross-Dataset Ablation on SAMM and SMIC
-# =============================================================================
-# Expected time: ~6h on 4090
+# P0: Cross-Dataset Ablation (~6h)
+echo ""
+echo "=========================================="
+echo "[4/7] Cross-Dataset Ablation - SAMM"
+echo "=========================================="
+python experiments/exp7_deep_ablation.py \
+    --experiment cross_dataset --dataset samm --epochs 50 --batch_size 8 \
+    2>&1 | tee results/exp7_cross_samm.log
+echo "[4/7] Done: $(date)"
 
 echo ""
 echo "=========================================="
-echo "P0: Cross-Dataset Ablation (SAMM)"
+echo "[5/7] Cross-Dataset Ablation - SMIC"
 echo "=========================================="
-echo "Start time: $(date)"
-
 python experiments/exp7_deep_ablation.py \
-    --experiment cross_dataset \
-    --dataset samm \
-    --epochs 50 \
-    --batch_size 8 \
-    2>&1 | tee -a results/exp7_cross_samm.log
+    --experiment cross_dataset --dataset smic --epochs 50 --num_classes 3 --batch_size 8 \
+    2>&1 | tee results/exp7_cross_smic.log
+echo "[5/7] Done: $(date)"
 
-echo "SAMM ablation done: $(date)"
-
-python experiments/exp7_deep_ablation.py \
-    --experiment cross_dataset \
-    --dataset smic \
-    --epochs 50 \
-    --num_classes 3 \
-    --batch_size 8 \
-    2>&1 | tee -a results/exp7_cross_smic.log
-
-echo "SMIC ablation done: $(date)"
-
-# =============================================================================
-# P1: MoE Alternative Fusion Comparison
-# =============================================================================
-# Expected time: ~4h on 4090
-
+# P1: MoE Alternative Fusion (~4h)
 echo ""
 echo "=========================================="
-echo "P1: MoE Alternative Fusion"
+echo "[6/7] MoE Alternative Fusion - CASME II"
 echo "=========================================="
-echo "Start time: $(date)"
-
 python experiments/exp7_deep_ablation.py \
-    --experiment moe_alternatives \
-    --dataset casme2 \
-    --epochs 50 \
-    --batch_size 8 \
-    2>&1 | tee -a results/exp7_moe_casme2.log
+    --experiment moe_alternatives --dataset casme2 --epochs 50 --batch_size 8 \
+    2>&1 | tee results/exp7_moe_casme2.log
+echo "[6/7] Done: $(date)"
 
-echo "MoE alternatives done: $(date)"
-
-# =============================================================================
-# P1: Failure Case Analysis
-# =============================================================================
-# Expected time: ~4h on 4090 (requires training + inference)
-
+# P1: Failure Case Analysis (~4h)
 echo ""
 echo "=========================================="
-echo "P1: Failure Case Analysis"
+echo "[7/7] Failure Case Analysis - CASME II"
 echo "=========================================="
-echo "Start time: $(date)"
-
 python experiments/exp8_failure_analysis.py \
-    --dataset casme2 \
-    --batch_size 8 \
-    2>&1 | tee -a results/exp8_casme2.log
-
-echo "CASME2 failure analysis done: $(date)"
-
-python experiments/exp8_failure_analysis.py \
-    --dataset samm \
-    --batch_size 8 \
-    2>&1 | tee -a results/exp8_samm.log
-
-echo "SAMM failure analysis done: $(date)"
-
-# =============================================================================
-# P2: rPPG Feature Analysis
-# =============================================================================
-# Expected time: ~30 min (no training, feature extraction only)
-
-echo ""
-echo "=========================================="
-echo "P2: rPPG Feature Analysis"
-echo "=========================================="
-echo "Start time: $(date)"
-
-python experiments/exp7_deep_ablation.py \
-    --experiment rppg_analysis \
-    --dataset casme2 \
-    2>&1 | tee -a results/exp7_rppg_casme2.log
-
-echo "rPPG analysis done: $(date)"
+    --dataset casme2 --batch_size 8 \
+    2>&1 | tee results/exp8_casme2.log
+echo "[7/7] Done: $(date)"
 
 # =============================================================================
 # Summary
 # =============================================================================
-
 echo ""
 echo "=========================================="
 echo "ALL EXPERIMENTS COMPLETE"
-echo "End time: $(date)"
+echo "End: $(date)"
 echo "=========================================="
 
-echo ""
-echo "Results files:"
-ls -la results/exp1b_*.json 2>/dev/null || echo "  No exp1b results"
-ls -la results/exp7_*.json 2>/dev/null || echo "  No exp7 results"
-ls -la results/exp8_*.json 2>/dev/null || echo "  No exp8 results"
+ls -la results/*.json 2>/dev/null || echo "No results yet"
 
 echo ""
-echo "Key comparison (Multi-scale 3D ResNet vs Censor):"
-echo "  CASME II claimed: 91.35%"
+echo "KEY COMPARISON:"
+echo "  Multi-scale 3D ResNet claimed: 91.35% (CASME II)"
 echo "  Our Censor: 87.74%"
-echo "  Check exp1b results for reproduced accuracy"
-
-echo ""
-echo "Next steps:"
-echo "  1. Compare exp1b results with original SOTA claims"
-echo "  2. If exp1b shows <89%, our 87.74% is competitive under strict LOSO"
-echo "  3. Update paper with new cross-dataset ablation data"
-echo "  4. Add confusion matrix and failure analysis to Discussion"
+echo "  If exp1b < 89%, our result is competitive under strict LOSO"

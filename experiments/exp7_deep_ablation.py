@@ -555,14 +555,6 @@ def run_moe_alternatives(args, device):
         except Exception as e:
             print(f"[WARNING] Could not load Censor: {e}")
             has_censor = False
-            print("[WARNING] No Censor checkpoint found. "
-                  "Using random weights for feature extraction.")
-        censor_full.eval()
-        has_censor = True
-    except Exception as e:
-        print(f"[WARNING] Could not load Censor model: {e}")
-        print("Falling back to independent model training...")
-        has_censor = False
 
     if args.quick_test:
         splits = splits[:3]

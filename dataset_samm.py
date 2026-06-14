@@ -100,9 +100,12 @@ class SAMMDataset(Dataset):
                 break
 
         if excel_path is not None:
-            return self._load_from_excel(excel_path)
-        else:
-            return self._load_from_directory()
+            samples = self._load_from_excel(excel_path)
+            if len(samples) > 0:
+                return samples
+            print(f"[SAMMDataset] Excel parsing returned 0 samples, falling back to directory scan")
+
+        return self._load_from_directory()
 
     def _load_from_excel(self, excel_path):
         """Load annotations from SAMM Excel file."""

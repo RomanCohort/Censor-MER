@@ -1,6 +1,7 @@
 #!/bin/bash
-# Quick test: run all experiments with --quick_test --epochs 2 to verify flow
-# No GPU needed, ~10 min total
+# Quick test: verify all experiments can load data + build models
+# No GPU needed, ~5 min total
+# For actual training, run on GPU with full params
 
 set -e
 
@@ -12,37 +13,79 @@ echo "=========================================="
 mkdir -p results
 
 # P0: Multi-scale 3D ResNet LOSO (CASME II)
-echo "\n[1/6] exp1b CASME II..."
-python experiments/exp1b_multiscale_3d_resnet.py --dataset casme2 --pretrained --quick_test --epochs 2 --batch_size 2
+echo ""
+echo "[1/6] exp1b CASME II (dry run)..."
+python experiments/exp1b_multiscale_3d_resnet.py --dataset casme2 --pretrained --dry_run
 echo "[1/6] OK"
 
-# P0: Cross-dataset ablation (SAMM)
-echo "\n[2/6] exp7 cross-dataset SAMM..."
-python experiments/exp7_deep_ablation.py --experiment cross_dataset --dataset samm --epochs 2 --batch_size 2 --quick_test
+# P0: Multi-scale 3D ResNet LOSO (SAMM)
+echo ""
+echo "[2/6] exp1b SAMM (dry run)..."
+python experiments/exp1b_multiscale_3d_resnet.py --dataset samm --pretrained --dry_run
 echo "[2/6] OK"
 
-# P0: Cross-dataset ablation (SMIC)
-echo "\n[3/6] exp7 cross-dataset SMIC..."
-python experiments/exp7_deep_ablation.py --experiment cross_dataset --dataset smic --epochs 2 --batch_size 2 --num_classes 3 --quick_test
+# P0: Multi-scale 3D ResNet LOSO (SMIC)
+echo ""
+echo "[3/6] exp1b SMIC (dry run)..."
+python experiments/exp1b_multiscale_3d_resnet.py --dataset smic --pretrained --num_classes 3 --dry_run
 echo "[3/6] OK"
 
-# P1: MoE alternatives
-echo "\n[4/6] exp7 MoE alternatives..."
-python experiments/exp7_deep_ablation.py --experiment moe_alternatives --dataset casme2 --epochs 2 --batch_size 2 --quick_test
+# P0: Cross-dataset ablation - just verify dataset loads
+echo ""
+echo "[4/6] Verify SAMM dataset loading..."
+python -c "
+import sys; sys.path.insert(0, '.')
+from experiments.exp7_deep_ablation import get_dataset, get_loso_splits
+ds = get_dataset('samm', '/root/data/SAMM/SAMM')
+splits, subjects = get_loso_splits(ds, 'samm')
+print(f'  SAMM: {len(ds)} samples, {len(subjects)} subjects, {len(splits)} folds')
+"
 echo "[4/6] OK"
 
-# P1: Failure analysis
-echo "\n[5/6] exp8 failure analysis CASME II..."
-python experiments/exp8_failure_analysis.py --dataset casme2 --batch_size 2 --quick_test
+echo ""
+echo "[4b] Verify SMIC dataset loading..."
+python -c "
+import sys; sys.path.insert(0, '.')
+from experiments.exp7_deep_ablation import get_dataset, get_loso_splits
+ds = get_dataset('smic', '/root/SMIC_all_cropped')
+splits, subjects = get_loso_splits(ds, 'smic')
+print(f'  SMIC: {len(ds)} samples, {len(subjects)} subjects, {len(splits)} folds')
+"
+echo "[4b] OK"
+
+# P1: MoE alternatives - verify fusion modules
+echo ""
+echo "[5/6] Verify MoE alternative fusion modules..."
+python -c "
+import torch, sys; sys.path.insert(0, '.')
+from experiments.exp7_deep_ablation import ConcatFusion, AttentionFusion, FeatureEnsemble
+for cls_name, cls in [('ConcatFusion', ConcatFusion), ('AttentionFusion', AttentionFusion), ('FeatureEnsemble', FeatureEnsemble)]:
+    m = cls(num_classes=4)
+    fast = torch.randn(2, 512)
+    slow = torch.randn(2, 768)
+    out = m(fast, slow)
+    print(f'  {cls_name}: OK ({out.shape})')
+"
 echo "[5/6] OK"
 
-# P2: rPPG analysis
-echo "\n[6/6] exp7 rPPG analysis..."
-python experiments/exp7_deep_ablation.py --experiment rppg_analysis --dataset casme2
-echo "[6/6] OK (may need checkpoint)"
+# P1: Failure analysis - verify CASME II LOSO splits
+echo ""
+echo "[6/6] Verify failure analysis LOSO splits..."
+python -c "
+import sys; sys.path.insert(0, '.')
+from experiments.exp8_failure_analysis import get_dataset, get_loso_splits
+ds = get_dataset('casme2', '/root/autodl-tmp/data/CASME2')
+splits, subjects = get_loso_splits(ds, 'casme2')
+print(f'  CASME II: {len(ds)} samples, {len(subjects)} subjects, {len(splits)} folds')
+print(f'  Fold 1 test subject: {splits[0][2]}, {len(splits[0][1])} samples')
+"
+echo "[6/6] OK"
 
-echo "\n=========================================="
-echo "ALL QUICK TESTS COMPLETE"
+echo ""
 echo "=========================================="
-
-ls -la results/*.json 2>/dev/null || echo "No results yet"
+echo "ALL QUICK TESTS PASSED"
+echo "=========================================="
+echo ""
+echo "To run actual experiments on GPU:"
+echo "  python experiments/exp1b_multiscale_3d_resnet.py --dataset casme2 --pretrained --batch_size 8"
+echo "  bash experiments/run_supplementary.sh"

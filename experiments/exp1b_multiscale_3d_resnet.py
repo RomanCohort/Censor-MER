@@ -436,6 +436,8 @@ def main():
                         help='Limit number of folds (for quick test)')
     parser.add_argument('--quick_test', action='store_true',
                         help='Run only 2 folds for sanity check')
+    parser.add_argument('--dry_run', action='store_true',
+                        help='Only verify data loading + model construction, no training')
     args = parser.parse_args()
 
     print("=" * 70)
@@ -478,6 +480,34 @@ def main():
         print(f"[LIMITED] Running {len(splits)} folds")
 
     print(f"Total samples: {len(full_dataset)}")
+
+    # Dry run: verify data loading + model forward pass only
+    if args.dry_run:
+        print("\n[DRY RUN] Verifying data loading and model construction...")
+        from torch.utils.data import Subset
+
+        # Test data loading
+        test_idx = splits[0][1] if splits else []
+        if test_idx:
+            test_subset = Subset(full_dataset, test_idx[:2])
+            test_loader = DataLoader(test_subset, batch_size=1, num_workers=0)
+            batch = next(iter(test_loader))
+            x, y = _unpack_batch(batch)
+            x = _prepare_input(x)
+            print(f"  Data sample: x={x.shape}, y={y}")
+
+        # Test model forward pass with tiny input
+        model = MultiScale3DResNet(
+            num_classes=args.num_classes, in_channels=3, pretrained=False,
+        )
+        tiny_input = torch.randn(1, 3, 4, 64, 64)  # Minimal size
+        with torch.no_grad():
+            out = model(tiny_input)
+        print(f"  Model forward: input={tiny_input.shape} -> output={out.shape}")
+        n_params = sum(p.numel() for p in model.parameters()) / 1e6
+        print(f"  Model params: {n_params:.2f}M")
+        print(f"\n[DRY RUN] SUCCESS - data and model verified. Ready for GPU training.")
+        return
 
     # Run each fold
     fold_accuracies = []

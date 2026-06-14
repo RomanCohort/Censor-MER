@@ -58,10 +58,32 @@ SAMM_CLASSES = ['happiness', 'surprise', 'disgust', 'repression']
 SMIC_CLASSES = ['positive', 'negative', 'surprise']
 
 
+def _unpack_batch(batch):
+    """Unpack batch from dataset. Handles both dict and tuple formats."""
+    if isinstance(batch, dict):
+        x = batch['video'] if 'video' in batch else batch[0]
+        y = batch['label'] if 'label' in batch else batch[1]
+    elif isinstance(batch, (list, tuple)):
+        x = batch[0]
+        y = batch[1]
+    else:
+        raise ValueError(f"Unexpected batch type: {type(batch)}")
+    return x, y
+
+
+def _prepare_input(x):
+    """Prepare input tensor for 3D model: ensure (B, C=3, T, H, W)."""
+    if x.dim() == 5 and x.shape[-1] in (3, 6):
+        x = x.permute(0, 4, 1, 2, 3).contiguous()
+    if x.dim() == 5 and x.shape[1] > 3:
+        x = x[:, :3]
+    return x
+
+
 def get_dataset(dataset_name, data_root):
     if dataset_name == 'casme2':
-        from dataset import MERDataset
-        return MERDataset(data_root, split='train')
+        from dataset_frames import FrameSequenceDataset
+        return FrameSequenceDataset(data_root, split='train')
     elif dataset_name == 'samm':
         from dataset_samm import SAMMDataset
         return SAMMDataset(data_root)
@@ -71,15 +93,26 @@ def get_dataset(dataset_name, data_root):
 
 
 def get_loso_splits(dataset, dataset_name):
-    subjects = sorted(set(s.get('subject', 'unknown') for s in dataset.samples))
+    if dataset_name == 'casme2':
+        from dataset_frames import FrameSequenceDataset
+        subjects = sorted(dataset.samples['subject'].unique())
+    else:
+        subjects = sorted(set(s.get('subject', 'unknown') for s in dataset.samples))
+
     if dataset_name == 'casme2':
         subjects = [s for s in subjects if s not in CASME2_EXCLUDED]
 
     subj_to_idx = defaultdict(list)
-    for i, s in enumerate(dataset.samples):
-        subj = s.get('subject', 'unknown')
-        if subj in subjects:
-            subj_to_idx[subj].append(i)
+    if dataset_name == 'casme2':
+        for i in range(len(dataset.samples)):
+            subj = dataset.samples.iloc[i]['subject']
+            if subj in subjects:
+                subj_to_idx[subj].append(i)
+    else:
+        for i, s in enumerate(dataset.samples):
+            subj = s.get('subject', 'unknown')
+            if subj in subjects:
+                subj_to_idx[subj].append(i)
 
     splits = []
     for subj in subjects:
@@ -166,8 +199,13 @@ def analyze_fold_composition(dataset, test_idx, class_names):
     """Analyze class composition of a test fold."""
     class_counts = defaultdict(int)
     for idx in test_idx:
-        sample = dataset.samples[idx]
-        label = sample.get('label', sample.get('emotion_code', 0))
+        # Handle both DataFrame (CASME II) and dict/list (SAMM/SMIC)
+        if hasattr(dataset.samples, 'iloc'):
+            sample = dataset.samples.iloc[idx]
+            label = sample.get('me_label', 0)
+        else:
+            sample = dataset.samples[idx]
+            label = sample.get('label', sample.get('me_label', sample.get('emotion_code', 0)))
         if isinstance(label, str):
             label = class_names.index(label) if label in class_names else 0
         class_counts[class_names[label] if label < len(class_names) else str(label)] += 1
@@ -185,13 +223,9 @@ def extract_features_and_predictions(model, loader, device):
 
     with torch.no_grad():
         for batch in loader:
-            x = batch['video'].to(device) if 'video' in batch else batch[0].to(device)
-            y = batch['label'].to(device) if 'label' in batch else batch[1].to(device)
-
-            if x.shape[-1] == 3 or x.shape[-1] == 6:
-                x = x.permute(0, 4, 1, 2, 3).contiguous()
-            if x.shape[1] > 3:
-                x = x[:, :3]
+            x, y = _unpack_batch(batch)
+            x = _prepare_input(x).to(device)
+            y = y.to(device)
 
             # Forward pass
             try:
@@ -398,8 +432,12 @@ def main():
         fold_preds = []
         test_idx = splits[fold_idx][1]
         for idx in test_idx:
-            sample = dataset.samples[idx]
-            label = sample.get('label', sample.get('emotion_code', 0))
+            if hasattr(dataset.samples, 'iloc'):
+                sample = dataset.samples.iloc[idx]
+                label = sample.get('me_label', 0)
+            else:
+                sample = dataset.samples[idx]
+                label = sample.get('label', sample.get('me_label', sample.get('emotion_code', 0)))
             if isinstance(label, str):
                 label = class_names.index(label) if label in class_names else 0
             fold_labels.append(label)

@@ -245,24 +245,25 @@ class MultiScale3DResNet(nn.Module):
 # LOSO Cross-Validation
 # =============================================================================
 
-def get_loso_splits(dataset_name, data_root, loso_subjects=None):
+def get_loso_splits(dataset_name, data_root):
     """
-    Build LOSO splits: each split has one subject as test set.
+    Build LOSO splits using FrameSequenceDataset (loads frames from directories,
+    not video files which may have path issues).
 
     Returns: list of (train_indices, test_indices, test_subject_id)
     """
     if dataset_name == 'casme2':
-        from dataset import MERDataset
-        ds = MERDataset(data_root, split='train')
+        from dataset_frames import FrameSequenceDataset
+        ds = FrameSequenceDataset(data_root, split='train')
 
-        # Get subject list
-        subjects = sorted(set(s.get('subject', 'unknown') for s in ds.samples))
+        # Get subject list from DataFrame
+        subjects = sorted(ds.samples['subject'].unique())
         subjects = [s for s in subjects if s not in CASME2_EXCLUDED]
 
         # Build subject-to-indices map
         subj_to_idx = defaultdict(list)
-        for i, s in enumerate(ds.samples):
-            subj = s.get('subject', 'unknown')
+        for i in range(len(ds.samples)):
+            subj = ds.samples.iloc[i]['subject']
             if subj in subjects:
                 subj_to_idx[subj].append(i)
 
@@ -271,9 +272,10 @@ def get_loso_splits(dataset_name, data_root, loso_subjects=None):
             test_idx = subj_to_idx[subj]
             train_idx = [i for s, idxs in subj_to_idx.items() if s != subj for i in idxs]
             splits.append((train_idx, test_idx, subj))
-        return splits, len(subjects)
+        return splits, len(subjects), ds
 
     elif dataset_name == 'samm':
+        from dataset_frames import FrameSequenceDataset  # reuse with SAMM loader
         from dataset_samm import SAMMDataset
         ds = SAMMDataset(data_root)
         subjects = sorted(set(s.get('subject', 'unknown') for s in ds.samples))
@@ -286,7 +288,7 @@ def get_loso_splits(dataset_name, data_root, loso_subjects=None):
             test_idx = subj_to_idx[subj]
             train_idx = [i for s, idxs in subj_to_idx.items() if s != subj for i in idxs]
             splits.append((train_idx, test_idx, subj))
-        return splits, len(subjects)
+        return splits, len(subjects), ds
 
     elif dataset_name == 'smic':
         from dataset_smic import SMICDataset
@@ -301,10 +303,34 @@ def get_loso_splits(dataset_name, data_root, loso_subjects=None):
             test_idx = subj_to_idx[subj]
             train_idx = [i for s, idxs in subj_to_idx.items() if s != subj for i in idxs]
             splits.append((train_idx, test_idx, subj))
-        return splits, len(subjects)
+        return splits, len(subjects), ds
 
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
+
+
+def _unpack_batch(batch):
+    """Unpack batch from dataset. Handles both dict and tuple formats."""
+    if isinstance(batch, dict):
+        x = batch['video'] if 'video' in batch else batch[0]
+        y = batch['label'] if 'label' in batch else batch[1]
+    elif isinstance(batch, (list, tuple)):
+        x = batch[0]  # video tensor (B, C, T, H, W) or (B, T, H, W, C)
+        y = batch[1]  # label
+    else:
+        raise ValueError(f"Unexpected batch type: {type(batch)}")
+    return x, y
+
+
+def _prepare_input(x):
+    """Prepare input tensor for 3D model: ensure (B, C=3, T, H, W)."""
+    # If (B, T, H, W, C), convert to (B, C, T, H, W)
+    if x.dim() == 5 and x.shape[-1] in (3, 6):
+        x = x.permute(0, 4, 1, 2, 3).contiguous()
+    # Use first 3 channels if more (e.g., RGB+rPPG has 6)
+    if x.dim() == 5 and x.shape[1] > 3:
+        x = x[:, :3]
+    return x
 
 
 def train_one_fold(model, train_loader, test_loader, device, epochs, lr, log_prefix=''):
@@ -336,19 +362,9 @@ def train_one_fold(model, train_loader, test_loader, device, epochs, lr, log_pre
         epoch_loss = 0.0
         n_batches = 0
         for batch in train_loader:
-            x = batch['video'].to(device) if 'video' in batch else batch[0].to(device)
-            y = batch['label'].to(device) if 'label' in batch else batch[1].to(device)
-
-            # If input is (B, T, H, W, C), convert to (B, C, T, H, W)
-            if x.shape[-1] == 3 or x.shape[-1] == 6:
-                x = x.permute(0, 4, 1, 2, 3).contiguous()
-            # If has flow as second input
-            if isinstance(x, tuple):
-                x = x[0]
-
-            # Use first 3 channels if more
-            if x.shape[1] > 3:
-                x = x[:, :3]
+            x, y = _unpack_batch(batch)
+            x = _prepare_input(x).to(device)
+            y = y.to(device)
 
             logits = model(x)
             loss = criterion(logits, y)
@@ -392,15 +408,9 @@ def evaluate(model, loader, device):
     total = 0
     with torch.no_grad():
         for batch in loader:
-            x = batch['video'].to(device) if 'video' in batch else batch[0].to(device)
-            y = batch['label'].to(device) if 'label' in batch else batch[1].to(device)
-
-            if x.shape[-1] == 3 or x.shape[-1] == 6:
-                x = x.permute(0, 4, 1, 2, 3).contiguous()
-            if isinstance(x, tuple):
-                x = x[0]
-            if x.shape[1] > 3:
-                x = x[:, :3]
+            x, y = _unpack_batch(batch)
+            x = _prepare_input(x).to(device)
+            y = y.to(device)
 
             logits = model(x)
             pred = logits.argmax(dim=1)
@@ -457,7 +467,7 @@ def main():
 
     # Get LOSO splits
     print("\nBuilding LOSO splits...")
-    splits, num_subjects = get_loso_splits(args.dataset, data_root)
+    splits, num_subjects, full_dataset = get_loso_splits(args.dataset, data_root)
     print(f"Total subjects: {num_subjects}, total folds: {len(splits)}")
 
     if args.quick_test:
@@ -467,18 +477,7 @@ def main():
         splits = splits[:args.max_folds]
         print(f"[LIMITED] Running {len(splits)} folds")
 
-    # Build dataset
-    if args.dataset == 'casme2':
-        from dataset import MERDataset
-        full_dataset = MERDataset(data_root, split='train')
-    elif args.dataset == 'samm':
-        from dataset_samm import SAMMDataset
-        full_dataset = SAMMDataset(data_root)
-    elif args.dataset == 'smic':
-        from dataset_smic import SMICDataset
-        full_dataset = SMICDataset(data_root)
-
-    print(f"Total samples: {len(full_dataset.samples)}")
+    print(f"Total samples: {len(full_dataset)}")
 
     # Run each fold
     fold_accuracies = []

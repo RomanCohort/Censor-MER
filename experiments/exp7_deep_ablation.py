@@ -214,11 +214,32 @@ class GatedTemporalAttention(nn.Module):
 # Training & Eval utilities
 # =============================================================================
 
+def _unpack_batch(batch):
+    """Unpack batch from dataset. Handles both dict and tuple formats."""
+    if isinstance(batch, dict):
+        x = batch['video'] if 'video' in batch else batch[0]
+        y = batch['label'] if 'label' in batch else batch[1]
+    elif isinstance(batch, (list, tuple)):
+        x = batch[0]
+        y = batch[1]
+    else:
+        raise ValueError(f"Unexpected batch type: {type(batch)}")
+    return x, y
+
+
+def _prepare_input(x):
+    """Prepare input tensor for 3D model: ensure (B, C=3, T, H, W)."""
+    if x.dim() == 5 and x.shape[-1] in (3, 6):
+        x = x.permute(0, 4, 1, 2, 3).contiguous()
+    if x.dim() == 5 and x.shape[1] > 3:
+        x = x[:, :3]
+    return x
+
 def get_dataset(dataset_name, data_root):
-    """Load dataset."""
+    """Load dataset. Use FrameSequenceDataset for CASME II to avoid video path issues."""
     if dataset_name == 'casme2':
-        from dataset import MERDataset
-        return MERDataset(data_root, split='train')
+        from dataset_frames import FrameSequenceDataset
+        return FrameSequenceDataset(data_root, split='train')
     elif dataset_name == 'samm':
         from dataset_samm import SAMMDataset
         return SAMMDataset(data_root)
@@ -231,15 +252,26 @@ def get_dataset(dataset_name, data_root):
 
 def get_loso_splits(dataset, dataset_name):
     """Build LOSO splits from dataset."""
-    subjects = sorted(set(s.get('subject', 'unknown') for s in dataset.samples))
+    if dataset_name == 'casme2':
+        from dataset_frames import FrameSequenceDataset
+        subjects = sorted(dataset.samples['subject'].unique())
+    else:
+        subjects = sorted(set(s.get('subject', 'unknown') for s in dataset.samples))
+
     if dataset_name == 'casme2':
         subjects = [s for s in subjects if s not in CASME2_EXCLUDED]
 
     subj_to_idx = defaultdict(list)
-    for i, s in enumerate(dataset.samples):
-        subj = s.get('subject', 'unknown')
-        if subj in subjects:
-            subj_to_idx[subj].append(i)
+    if dataset_name == 'casme2':
+        for i in range(len(dataset.samples)):
+            subj = dataset.samples.iloc[i]['subject']
+            if subj in subjects:
+                subj_to_idx[subj].append(i)
+    else:
+        for i, s in enumerate(dataset.samples):
+            subj = s.get('subject', 'unknown')
+            if subj in subjects:
+                subj_to_idx[subj].append(i)
 
     splits = []
     for subj in subjects:
@@ -280,11 +312,9 @@ def train_censor_variant(model, censor_full, fusion_type, train_loader, test_loa
         n_batches = 0
 
         for batch in train_loader:
-            x = batch['video'].to(device) if 'video' in batch else batch[0].to(device)
-            y = batch['label'].to(device) if 'label' in batch else batch[1].to(device)
-
-            if x.shape[-1] == 3 or x.shape[-1] == 6:
-                x = x.permute(0, 4, 1, 2, 3).contiguous()
+            x, y = _unpack_batch(batch)
+            x = _prepare_input(x).to(device)
+            y = y.to(device)
 
             with torch.no_grad():
                 # Extract features from frozen Censor backbone
@@ -330,11 +360,9 @@ def evaluate_fusion(fusion_model, censor_full, loader, device):
 
     with torch.no_grad():
         for batch in loader:
-            x = batch['video'].to(device) if 'video' in batch else batch[0].to(device)
-            y = batch['label'].to(device) if 'label' in batch else batch[1].to(device)
-
-            if x.shape[-1] == 3 or x.shape[-1] == 6:
-                x = x.permute(0, 4, 1, 2, 3).contiguous()
+            x, y = _unpack_batch(batch)
+            x = _prepare_input(x).to(device)
+            y = y.to(device)
 
             fast_feat = censor_full.extract_fast_features(x)
             slow_feat = censor_full.extract_slow_features(x)
@@ -354,13 +382,9 @@ def evaluate_full_model(model, loader, device):
 
     with torch.no_grad():
         for batch in loader:
-            x = batch['video'].to(device) if 'video' in batch else batch[0].to(device)
-            y = batch['label'].to(device) if 'label' in batch else batch[1].to(device)
-
-            if x.shape[-1] == 3 or x.shape[-1] == 6:
-                x = x.permute(0, 4, 1, 2, 3).contiguous()
-            if x.shape[1] > 3:
-                x = x[:, :3]
+            x, y = _unpack_batch(batch)
+            x = _prepare_input(x).to(device)
+            y = y.to(device)
 
             logits = model(x)
             pred = logits.argmax(dim=1)
@@ -386,13 +410,9 @@ def train_model(model, train_loader, test_loader, device, epochs, lr):
         n_batches = 0
 
         for batch in train_loader:
-            x = batch['video'].to(device) if 'video' in batch else batch[0].to(device)
-            y = batch['label'].to(device) if 'label' in batch else batch[1].to(device)
-
-            if x.shape[-1] == 3 or x.shape[-1] == 6:
-                x = x.permute(0, 4, 1, 2, 3).contiguous()
-            if x.shape[1] > 3:
-                x = x[:, :3]
+            x, y = _unpack_batch(batch)
+            x = _prepare_input(x).to(device)
+            y = y.to(device)
 
             logits = model(x)
             loss = criterion(logits, y)
@@ -680,11 +700,9 @@ def run_rppg_analysis(args, device):
     print("Extracting features...")
     with torch.no_grad():
         for batch in loader:
-            x = batch['video'].to(device) if 'video' in batch else batch[0].to(device)
-            y = batch['label'].to(device) if 'label' in batch else batch[1].to(device)
-
-            if x.shape[-1] == 3 or x.shape[-1] == 6:
-                x = x.permute(0, 4, 1, 2, 3).contiguous()
+            x, y = _unpack_batch(batch)
+            x = _prepare_input(x).to(device)
+            y = y.to(device)
 
             # Extract separate features
             try:

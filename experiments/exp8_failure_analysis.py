@@ -295,10 +295,9 @@ def main():
         splits, subjects = build_loso_splits(dataset)
         use_cached = True
     else:
-        print("[WARNING] No cached features. Run preextract_censor_features.py first!")
-        dataset = get_dataset(args.dataset, data_root)
-        splits, subjects = get_loso_splits(dataset, args.dataset)
-        use_cached = False
+        print(f"[ERROR] No cached features at {feat_path}")
+        print("  Run: python experiments/preextract_censor_features.py --dataset " + args.dataset)
+        return
 
     if args.quick_test:
         splits = splits[:3]

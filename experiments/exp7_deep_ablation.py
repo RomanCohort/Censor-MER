@@ -535,26 +535,9 @@ def run_moe_alternatives(args, device):
         has_censor = True
         use_cached_features = True
     else:
-        print("[WARNING] No cached features. Falling back to slow Censor forward pass.")
-        print("  Run 'python experiments/preextract_censor_features.py' first for speedup.")
-        dataset = get_dataset(args.dataset, data_root)
-        splits, subjects = get_loso_splits(dataset, args.dataset)
-        has_censor = False
-        use_cached_features = False
-
-        # Try loading Censor model
-        try:
-            import importlib.util
-            spec = importlib.util.spec_from_file_location(
-                "main_module", str(Path(__file__).parent.parent / "main.py"))
-            main_module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(main_module)
-            Censor = main_module.Censor
-            censor_full = Censor(pretrained_backbone=True).to(device)
-            has_censor = True
-        except Exception as e:
-            print(f"[WARNING] Could not load Censor: {e}")
-            has_censor = False
+        print(f"[ERROR] No cached features at {feat_path}")
+        print("  Run: python experiments/preextract_censor_features.py --dataset " + args.dataset)
+        return None
 
     if args.quick_test:
         splits = splits[:3]

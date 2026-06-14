@@ -83,13 +83,13 @@ def _prepare_input(x):
 def get_dataset(dataset_name, data_root):
     if dataset_name == 'casme2':
         from dataset_frames import FrameSequenceDataset
-        return FrameSequenceDataset(data_root, split='train')
+        return FrameSequenceDataset(data_root, split='train', face_align=False)
     elif dataset_name == 'samm':
         from dataset_samm import SAMMDataset
-        return SAMMDataset(data_root)
+        return SAMMDataset(data_root, face_align=False)
     elif dataset_name == 'smic':
         from dataset_smic import SMICDataset
-        return SMICDataset(data_root)
+        return SMICDataset(data_root, face_align=False)
 
 
 def get_loso_splits(dataset, dataset_name):
@@ -331,9 +331,9 @@ def main():
         test_subset = Subset(dataset, test_idx)
 
         train_loader = DataLoader(train_subset, batch_size=args.batch_size,
-                                  shuffle=True, num_workers=2, pin_memory=True)
+                                  shuffle=True, num_workers=0, pin_memory=True)
         test_loader = DataLoader(test_subset, batch_size=args.batch_size,
-                                 shuffle=False, num_workers=2, pin_memory=True)
+                                 shuffle=False, num_workers=0, pin_memory=True)
 
         # Build and train model
         from experiments.exp1b_multiscale_3d_resnet import train_one_fold

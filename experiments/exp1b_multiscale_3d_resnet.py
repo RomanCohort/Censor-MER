@@ -65,14 +65,14 @@ CASME2_CLASSES = ['happiness', 'surprise', 'disgust', 'repression']
 TRAIN_CONFIG = {
     'T': 16,             # frames
     'H': 224, 'W': 224,
-    'batch_size': 8,
-    'grad_accum': 2,
+    'batch_size': 2,     # Small for no-GPU / low-RAM mode
+    'grad_accum': 8,     # Effective batch = 2*8 = 16
     'lr': 1e-4,
     'backbone_lr': 1e-5,
     'weight_decay': 1e-4,
     'epochs': 50,
     'patience': 15,
-    'num_workers': 2,
+    'num_workers': 0,    # 0 to avoid OOM in workers
     'seed': 42,
 }
 
@@ -247,14 +247,14 @@ class MultiScale3DResNet(nn.Module):
 
 def get_loso_splits(dataset_name, data_root):
     """
-    Build LOSO splits using FrameSequenceDataset (loads frames from directories,
-    not video files which may have path issues).
+    Build LOSO splits using FrameSequenceDataset with face_align=False
+    (cropped frames don't need alignment, and mediapipe causes OOM).
 
     Returns: list of (train_indices, test_indices, test_subject_id)
     """
     if dataset_name == 'casme2':
         from dataset_frames import FrameSequenceDataset
-        ds = FrameSequenceDataset(data_root, split='train')
+        ds = FrameSequenceDataset(data_root, split='train', face_align=False)
 
         # Get subject list from DataFrame
         subjects = sorted(ds.samples['subject'].unique())
@@ -277,7 +277,7 @@ def get_loso_splits(dataset_name, data_root):
     elif dataset_name == 'samm':
         from dataset_frames import FrameSequenceDataset  # reuse with SAMM loader
         from dataset_samm import SAMMDataset
-        ds = SAMMDataset(data_root)
+        ds = SAMMDataset(data_root, face_align=False)
         subjects = sorted(set(s.get('subject', 'unknown') for s in ds.samples))
         subj_to_idx = defaultdict(list)
         for i, s in enumerate(ds.samples):
@@ -292,7 +292,7 @@ def get_loso_splits(dataset_name, data_root):
 
     elif dataset_name == 'smic':
         from dataset_smic import SMICDataset
-        ds = SMICDataset(data_root)
+        ds = SMICDataset(data_root, face_align=False)
         subjects = sorted(set(s.get('subject', 'unknown') for s in ds.samples))
         subj_to_idx = defaultdict(list)
         for i, s in enumerate(ds.samples):

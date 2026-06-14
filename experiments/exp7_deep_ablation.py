@@ -236,16 +236,16 @@ def _prepare_input(x):
     return x
 
 def get_dataset(dataset_name, data_root):
-    """Load dataset. Use FrameSequenceDataset for CASME II to avoid video path issues."""
+    """Load dataset with face_align=False to avoid mediapipe OOM."""
     if dataset_name == 'casme2':
         from dataset_frames import FrameSequenceDataset
-        return FrameSequenceDataset(data_root, split='train')
+        return FrameSequenceDataset(data_root, split='train', face_align=False)
     elif dataset_name == 'samm':
         from dataset_samm import SAMMDataset
-        return SAMMDataset(data_root)
+        return SAMMDataset(data_root, face_align=False)
     elif dataset_name == 'smic':
         from dataset_smic import SMICDataset
-        return SMICDataset(data_root)
+        return SMICDataset(data_root, face_align=False)
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
@@ -507,9 +507,9 @@ def run_moe_alternatives(args, device):
             test_subset = Subset(dataset, test_idx)
 
             train_loader = DataLoader(train_subset, batch_size=args.batch_size,
-                                      shuffle=True, num_workers=2, pin_memory=True)
+                                      shuffle=True, num_workers=0, pin_memory=True)
             test_loader = DataLoader(test_subset, batch_size=args.batch_size,
-                                     shuffle=False, num_workers=2, pin_memory=True)
+                                     shuffle=False, num_workers=0, pin_memory=True)
 
             model = fusion_cls(num_classes=args.num_classes).to(device)
 
@@ -627,9 +627,9 @@ def run_cross_dataset_ablation(args, device):
             test_subset = Subset(dataset, test_idx)
 
             train_loader = DataLoader(train_subset, batch_size=args.batch_size,
-                                      shuffle=True, num_workers=2, pin_memory=True)
+                                      shuffle=True, num_workers=0, pin_memory=True)
             test_loader = DataLoader(test_subset, batch_size=args.batch_size,
-                                     shuffle=False, num_workers=2, pin_memory=True)
+                                     shuffle=False, num_workers=0, pin_memory=True)
 
             model = builder()
 
@@ -690,7 +690,7 @@ def run_rppg_analysis(args, device):
 
     # Extract features
     loader = DataLoader(dataset, batch_size=8, shuffle=False,
-                        num_workers=2, pin_memory=True)
+                        num_workers=0, pin_memory=True)
 
     rgb_features = []
     rppg_features = []

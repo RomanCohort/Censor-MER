@@ -658,34 +658,43 @@ def main():
     print(f"Total time: {total_time/60:.1f} min ({(total_time/3600):.1f} h)")
     print(f"Avg time per fold: {total_time/60/len(splits):.1f} min")
 
-    # Comparison to claimed SOTA
+    # Comparison to published SOTA (from original papers)
     comparison = {
         'casme2': {
-            'claimed_sota': 91.35,
-            'source': 'Chen et al., Neurocomputing 2024',
+            'sota_5class': 74.60,
+            'sota_4class': 78.57,
+            'source': 'Li & Chen, IEEE/ACM TCBB 2021',
             'method': 'Multi-scale 3D ResNet',
+            'current_sota': 81.34,
+            'current_source': 'STGCN-CL, 2024',
         },
         'samm': {
-            'claimed_sota': 84.77,
-            'source': 'Chen et al., Neurocomputing 2024',
+            'sota': 72.00,
+            'source': 'Li & Chen, IEEE/ACM TCBB 2021',
             'method': 'Multi-scale 3D ResNet',
         },
         'smic': {
-            'claimed_sota': 74.60,
-            'source': 'Chen et al., Neurocomputing 2024',
+            'sota': 74.60,
+            'source': 'Li & Chen, IEEE/ACM TCBB 2021',
             'method': 'Multi-scale 3D ResNet',
         },
     }
 
     if args.dataset in comparison:
-        claimed = comparison[args.dataset]['claimed_sota']
+        info = comparison[args.dataset]
+        claimed = info.get('sota_4class', info.get('sota', 0))
         delta = mean_acc * 100 - claimed
-        print(f"\nClaimed SOTA: {claimed:.2f}% ({comparison[args.dataset]['source']})")
-        print(f"Our reproduction: {mean_acc*100:.2f}%")
-        print(f"Delta: {delta:+.2f} pp")
-        if abs(delta) > 3:
-            print(f"  -> Notable difference ({abs(delta):.1f} pp). "
-                  f"May indicate protocol discrepancy in original paper.")
+        print(f"\nPublished results ({info['source']}):")
+        if 'sota_5class' in info:
+            print(f"  5-class LOSO: {info['sota_5class']:.2f}%")
+            print(f"  4-class LOSO: {info['sota_4class']:.2f}%")
+        else:
+            print(f"  LOSO: {claimed:.2f}%")
+        if 'current_sota' in info:
+            print(f"  Current SOTA: {info['current_sota']:.2f}% ({info['current_source']})")
+        print(f"  Censor (pretrained): 87.74%")
+        print(f"\nOur reproduction: {mean_acc*100:.2f}% ± {std_acc*100:.2f}%")
+        print(f"  UF1: {np.mean(fold_uf1s)*100:.2f}% ± {np.std(fold_uf1s)*100:.2f}%")
 
     # Save results
     output_dir = Path(__file__).parent.parent / 'results'

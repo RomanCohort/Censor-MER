@@ -70,7 +70,7 @@ TRAIN_CONFIG = {
     'lr': 1e-4,
     'backbone_lr': 1e-5,
     'weight_decay': 1e-4,
-    'epochs': 50,
+    'epochs': 80,
     'patience': 15,
     'num_workers': 0,    # 0 to avoid OOM in workers
     'seed': 42,
@@ -337,22 +337,35 @@ def _prepare_input(x):
 def train_one_fold(model, train_loader, test_loader, device, epochs, lr, log_prefix=''):
     """Train model for one LOSO fold."""
 
-    # Freeze entire backbone, only train fc head
-    # ~150 samples with 33M params = severe overfitting
+    # Progressive unfreezing: train layer3+layer4+fc, freeze stem+layer1+layer2
+    # - stem+layer1+layer2: low-level features from Kinetics-400 (general motion)
+    # - layer3+layer4: high-level features (need adaptation for facial dynamics)
+    # - fc: task-specific head (random init)
     for name, p in model.named_parameters():
-        if 'fc' in name:
-            p.requires_grad = True   # ~2K params
+        if any(k in name for k in ['layer3', 'layer4', 'fc', 'ms3']):
+            p.requires_grad = True   # ~8M params
         else:
-            p.requires_grad = False  # Freeze everything
+            p.requires_grad = False  # Freeze stem + layer1 + layer2 + ms2
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
     print(f"  Trainable: {trainable/1e6:.2f}M / {total/1e6:.2f}M ({trainable/total*100:.1f}%)")
 
-    optimizer = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=lr, weight_decay=1e-4
-    )
+    # Differential LR: fine-tuned layers use 0.1x, fc uses 1x
+    ft_params = []
+    fc_params = []
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if 'fc' in name:
+            fc_params.append(p)
+        else:
+            ft_params.append(p)
+
+    optimizer = torch.optim.AdamW([
+        {'params': ft_params, 'lr': lr * 0.1, 'weight_decay': 1e-4},
+        {'params': fc_params, 'lr': lr, 'weight_decay': 1e-4},
+    ])
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)

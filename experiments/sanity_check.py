@@ -39,9 +39,9 @@ def main():
     checks_passed += check(torch.cuda.is_available(), "CUDA available")
     if torch.cuda.is_available():
         checks_passed += check(
-            torch.cuda.get_device_properties(0).total_mem > 10e9,
+            torch.cuda.get_device_properties(0).total_memory > 10e9,
             "GPU VRAM >= 10GB",
-            f"{torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB"
+            f"{torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB"
         )
     else:
         checks_passed += 0

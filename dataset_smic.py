@@ -127,7 +127,7 @@ class SMICDataset(Dataset):
                             continue
 
                         samples.append({
-                            'video_path': f"{subject_dir}/{emotion_dir}/{sample_dir}",
+                            'video_path': f"{subject_dir}/micro/{emotion_dir}/{sample_dir}",
                             'subject': subject_dir,
                             'filename': sample_dir,
                             'me_label': me_label,

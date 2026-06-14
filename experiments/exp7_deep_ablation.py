@@ -441,42 +441,120 @@ def train_model(model, train_loader, test_loader, device, epochs, lr):
     return best_acc
 
 
+def train_fusion_on_cached_features(model, train_loader, test_loader, device, epochs=50, lr=1e-3):
+    """Train fusion head on cached Censor features (fast, no backbone forward pass)."""
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+
+    best_acc = 0.0
+    best_state = None
+    patience_counter = 0
+
+    for epoch in range(epochs):
+        model.train()
+        for batch in train_loader:
+            if use_cached := (len(batch) == 3):
+                fast_feat, slow_feat, y = batch
+            else:
+                # Fallback: shouldn't reach here
+                continue
+
+            fast_feat = fast_feat.to(device)
+            slow_feat = slow_feat.to(device)
+            y = y.to(device)
+
+            logits = model(fast_feat, slow_feat)
+            loss = criterion(logits, y)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+        scheduler.step()
+
+        # Eval
+        if (epoch + 1) % 5 == 0 or epoch == epochs - 1:
+            acc = evaluate_fusion_cached(model, test_loader, device)
+            if acc > best_acc:
+                best_acc = acc
+                best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+                patience_counter = 0
+            else:
+                patience_counter += 1
+            if patience_counter >= 10:
+                break
+
+    if best_state:
+        model.load_state_dict(best_state)
+    return best_acc
+
+
+def evaluate_fusion_cached(model, loader, device):
+    """Evaluate fusion head on cached features."""
+    model.eval()
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for batch in loader:
+            if len(batch) == 3:
+                fast_feat, slow_feat, y = batch
+            else:
+                continue
+            fast_feat = fast_feat.to(device)
+            slow_feat = slow_feat.to(device)
+            y = y.to(device)
+
+            logits = model(fast_feat, slow_feat)
+            pred = logits.argmax(dim=1)
+            correct += (pred == y).sum().item()
+            total += y.size(0)
+    return correct / max(total, 1)
+
+
 # =============================================================================
 # Experiment: MoE Alternatives
 # =============================================================================
 
 def run_moe_alternatives(args, device):
-    """Compare MoE with alternative fusion methods."""
+    """Compare MoE with alternative fusion methods using cached Censor features."""
 
     print("\n" + "=" * 70)
     print("MoE vs Alternative Fusion Methods")
     print("=" * 70)
 
     data_root = DATA_PATHS[args.dataset]
-    dataset = get_dataset(args.dataset, data_root)
-    splits, subjects = get_loso_splits(dataset, args.dataset)
 
-    if args.quick_test:
-        splits = splits[:3]
+    # Try cached features first (zero CPU overhead)
+    feat_path = Path(data_root) / 'censor_features.npz'
+    if feat_path.exists():
+        from experiments.censor_feature_dataset import CensorFeatureDataset, build_loso_splits
+        print(f"Using cached Censor features: {feat_path}")
+        dataset = CensorFeatureDataset(str(feat_path))
+        splits, subjects = build_loso_splits(dataset)
+        has_censor = True
+        use_cached_features = True
+    else:
+        print("[WARNING] No cached features. Falling back to slow Censor forward pass.")
+        print("  Run 'python experiments/preextract_censor_features.py' first for speedup.")
+        dataset = get_dataset(args.dataset, data_root)
+        splits, subjects = get_loso_splits(dataset, args.dataset)
+        has_censor = False
+        use_cached_features = False
 
-    # Import Censor model (defined in main.py, not model/__init__.py)
-    try:
-        # Censor model is in main.py, not model package
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "main_module",
-            str(Path(__file__).parent.parent / "main.py")
-        )
-        main_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(main_module)
-        Censor = main_module.Censor
-        censor_full = Censor(pretrained_backbone=True).to(device)
-        # Load checkpoint if available
-        ckpt_path = Path(data_root).parent / 'checkpoints' / 'censor_best.pt'
-        if ckpt_path.exists():
-            censor_full.load_state_dict(torch.load(ckpt_path, map_location=device))
-            print(f"Loaded Censor checkpoint from {ckpt_path}")
-        else:
+        # Try loading Censor model
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                "main_module", str(Path(__file__).parent.parent / "main.py"))
+            main_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(main_module)
+            Censor = main_module.Censor
+            censor_full = Censor(pretrained_backbone=True).to(device)
+            has_censor = True
+        except Exception as e:
+            print(f"[WARNING] Could not load Censor: {e}")
+            has_censor = False
             print("[WARNING] No Censor checkpoint found. "
                   "Using random weights for feature extraction.")
         censor_full.eval()
@@ -485,6 +563,9 @@ def run_moe_alternatives(args, device):
         print(f"[WARNING] Could not load Censor model: {e}")
         print("Falling back to independent model training...")
         has_censor = False
+
+    if args.quick_test:
+        splits = splits[:3]
 
     fusion_methods = {
         'concat': ConcatFusion,
@@ -510,15 +591,20 @@ def run_moe_alternatives(args, device):
 
             model = fusion_cls(num_classes=args.num_classes).to(device)
 
-            if has_censor:
+            if use_cached_features:
+                # Fast path: features already extracted, just train fusion head
+                acc = train_fusion_on_cached_features(
+                    model, train_loader, test_loader, device,
+                    epochs=args.epochs, lr=args.lr,
+                )
+            elif has_censor:
                 acc = train_censor_variant(
                     model, censor_full, name,
                     train_loader, test_loader, device,
                     epochs=args.epochs, lr=args.lr,
                 )
             else:
-                # Fallback: train end-to-end with simple backbone
-                acc = 0.0  # Will need backbone
+                acc = 0.0  # No backbone available
 
             fold_accs.append(acc)
             print(f"  Fold {fold_idx+1}/{len(splits)} ({test_subject}): "

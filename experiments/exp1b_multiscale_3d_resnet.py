@@ -91,31 +91,35 @@ class MultiScale3DBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
         # Three parallel branches with different temporal receptive fields
-        mid = out_channels // 4
+        # Split channels: 3 branches, adjust to match out_channels exactly
+        branch_ch = out_channels // 3
+        remainder = out_channels - branch_ch * 3
 
         self.branch_t1 = nn.Sequential(
-            nn.Conv3d(in_channels, mid, kernel_size=(1, 3, 3), padding=(0, 1, 1)),
-            nn.BatchNorm3d(mid), nn.ReLU(inplace=True),
+            nn.Conv3d(in_channels, branch_ch + (1 if remainder > 0 else 0),
+                      kernel_size=(1, 3, 3), padding=(0, 1, 1)),
+            nn.BatchNorm3d(branch_ch + (1 if remainder > 0 else 0)),
+            nn.ReLU(inplace=True),
         )
         self.branch_t3 = nn.Sequential(
-            nn.Conv3d(in_channels, mid, kernel_size=(3, 3, 3), padding=(1, 1, 1)),
-            nn.BatchNorm3d(mid), nn.ReLU(inplace=True),
+            nn.Conv3d(in_channels, branch_ch + (1 if remainder > 1 else 0),
+                      kernel_size=(3, 3, 3), padding=(1, 1, 1)),
+            nn.BatchNorm3d(branch_ch + (1 if remainder > 1 else 0)),
+            nn.ReLU(inplace=True),
         )
         self.branch_t5 = nn.Sequential(
-            nn.Conv3d(in_channels, mid, kernel_size=(5, 3, 3), padding=(2, 1, 1)),
-            nn.BatchNorm3d(mid), nn.ReLU(inplace=True),
+            nn.Conv3d(in_channels, branch_ch,
+                      kernel_size=(5, 3, 3), padding=(2, 1, 1)),
+            nn.BatchNorm3d(branch_ch),
+            nn.ReLU(inplace=True),
         )
-        self.fuse = nn.Sequential(
-            nn.Conv3d(mid * 3, out_channels, kernel_size=1),
-            nn.BatchNorm3d(out_channels), nn.ReLU(inplace=True),
-        )
+        # No fuse needed: 3 branches sum to out_channels exactly
 
     def forward(self, x):
         a = self.branch_t1(x)
         b = self.branch_t3(x)
         c = self.branch_t5(x)
-        out = torch.cat([a, b, c], dim=1)
-        return self.fuse(out)
+        return torch.cat([a, b, c], dim=1)
 
 
 class BasicBlock3D(nn.Module):
@@ -149,12 +153,12 @@ class MultiScale3DResNet(nn.Module):
     """
     Multi-scale 3D ResNet for MER.
 
-    Architecture:
+    Architecture (standard 3D ResNet-18 backbone + multi-scale temporal blocks):
       - Stem: 3D conv (3->64) with stride (1,2,2)
-      - Layer 1: MultiScale3DBlock + BasicBlock3D (64->64)
-      - Layer 2: MultiScale3DBlock + BasicBlock3D (64->128) stride (2,2,2)
-      - Layer 3: MultiScale3DBlock + BasicBlock3D (128->256) stride (2,2,2)
-      - Layer 4: BasicBlock3D (256->512) stride (2,2,2)
+      - Layer 1: 2x BasicBlock3D (64->64)
+      - Layer 2: MultiScale3DBlock(64->64) + 2x BasicBlock3D (64->128)
+      - Layer 3: MultiScale3DBlock(128->128) + 2x BasicBlock3D (128->256)
+      - Layer 4: 2x BasicBlock3D (256->512)
       - Global avg pool + FC
     """
 
@@ -171,11 +175,13 @@ class MultiScale3DResNet(nn.Module):
             nn.MaxPool3d(kernel_size=(1, 3, 3), stride=(1, 2, 2), padding=(0, 1, 1)),
         )
 
-        # Multi-scale stages
-        self.layer1 = self._make_layer(64, 2, stride=1)
-        self.layer2 = self._make_layer(128, 2, stride=(2, 2, 2))
-        self.layer3 = self._make_layer(256, 2, stride=(2, 2, 2))
-        self.layer4 = self._make_layer(512, 2, stride=(2, 2, 2))
+        # Standard 3D ResNet-18 layers
+        self.layer1 = self._make_res_layer(64, 2, stride=1)
+        self.ms2 = MultiScale3DBlock(64, 64)      # Multi-scale before layer2
+        self.layer2 = self._make_res_layer(128, 2, stride=(2, 2, 2))
+        self.ms3 = MultiScale3DBlock(128, 128)     # Multi-scale before layer3
+        self.layer3 = self._make_res_layer(256, 2, stride=(2, 2, 2))
+        self.layer4 = self._make_res_layer(512, 2, stride=(2, 2, 2))
 
         self.avgpool = nn.AdaptiveAvgPool3d(1)
         self.fc = nn.Linear(512, num_classes)
@@ -184,18 +190,13 @@ class MultiScale3DResNet(nn.Module):
         if pretrained:
             self._load_pretrained_kinetics()
 
-    def _make_layer(self, planes, num_blocks, stride):
+    def _make_res_layer(self, planes, num_blocks, stride):
+        """Standard ResNet layer (no multi-scale)."""
         strides = [stride] + [1] * (num_blocks - 1)
         layers = []
         for s in strides:
             layers.append(BasicBlock3D(self.in_planes, planes, s))
             self.in_planes = planes * BasicBlock3D.expansion
-        # Insert MultiScale3DBlock at start of layer2, layer3, layer4
-        if planes >= 128:
-            ms_block = MultiScale3DBlock(self.in_planes, self.in_planes)
-            # Prepend multi-scale block
-            layers.insert(0, ms_block)
-            layers = [layers[0]] + layers  # avoid duplicate
         return nn.Sequential(*layers)
 
     def _init_weights(self):
@@ -230,7 +231,9 @@ class MultiScale3DResNet(nn.Module):
         # x: (B, C, T, H, W)
         x = self.stem(x)         # (B, 64, T, H/4, W/4)
         x = self.layer1(x)       # (B, 64, T, H/4, W/4)
+        x = self.ms2(x)          # Multi-scale temporal features (B, 64, T, H/4, W/4)
         x = self.layer2(x)       # (B, 128, T/2, H/8, W/8)
+        x = self.ms3(x)          # Multi-scale temporal features (B, 128, T/2, H/8, W/8)
         x = self.layer3(x)       # (B, 256, T/4, H/16, W/16)
         x = self.layer4(x)       # (B, 512, T/8, H/32, W/32)
         x = self.avgpool(x)      # (B, 512, 1, 1, 1)

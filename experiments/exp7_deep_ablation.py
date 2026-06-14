@@ -453,7 +453,7 @@ def run_moe_alternatives(args, device):
         main_module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(main_module)
         Censor = main_module.Censor
-        censor_full = Censor(num_classes=args.num_classes, pretrained_backbone=True).to(device)
+        censor_full = Censor(pretrained_backbone=True).to(device)
         # Load checkpoint if available
         ckpt_path = Path(data_root).parent / 'checkpoints' / 'censor_best.pt'
         if ckpt_path.exists():
@@ -560,22 +560,22 @@ def run_cross_dataset_ablation(args, device):
 
         def make_variant(name, num_classes):
             if name == 'fast_only':
-                return Censor(num_classes=num_classes, single_path='fast',
+                return Censor(single_path='fast',
                               pretrained_backbone=True).to(device)
             elif name == 'slow_only':
-                return Censor(num_classes=num_classes, single_path='slow',
+                return Censor(single_path='slow',
                               pretrained_backbone=True).to(device)
             elif name == 'dual_no_moe':
-                return Censor(num_classes=num_classes, no_moe=True,
+                return Censor(no_moe=True,
                               pretrained_backbone=True).to(device)
             elif name == 'no_casa':
-                return Censor(num_classes=num_classes, no_casa=True,
+                return Censor(no_casa=True,
                               pretrained_backbone=True).to(device)
             elif name == 'no_rppg':
-                return Censor(num_classes=num_classes, no_rppg=True,
+                return Censor(no_rppg=True,
                               pretrained_backbone=True).to(device)
             elif name == 'full':
-                return Censor(num_classes=num_classes, pretrained_backbone=True).to(device)
+                return Censor(pretrained_backbone=True).to(device)
 
         model_builders = {
             'fast_only': lambda: make_variant('fast_only', num_classes),
@@ -659,7 +659,7 @@ def run_rppg_analysis(args, device):
         main_module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(main_module)
         Censor = main_module.Censor
-        model = Censor(num_classes=args.num_classes, pretrained_backbone=True).to(device)
+        model = Censor(pretrained_backbone=True).to(device)
         ckpt_path = Path(data_root).parent / 'checkpoints' / 'censor_best.pt'
         if ckpt_path.exists():
             model.load_state_dict(torch.load(ckpt_path, map_location=device))

@@ -94,7 +94,7 @@ def main():
 
         # Test instantiation
         try:
-            model = Censor(num_classes=4, pretrained_backbone=False, verbose=False)
+            model = Censor(pretrained_backbone=False, verbose=False)
             checks_passed += check(True, "Censor instantiation", f"{sum(p.numel() for p in model.parameters()) / 1e6:.1f}M params")
         except Exception as e:
             checks_passed += check(False, "Censor instantiation", str(e)[:80])

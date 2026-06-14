@@ -272,8 +272,7 @@ def main():
         main_module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(main_module)
         Censor = main_module.Censor
-        model_fn = lambda: Censor(num_classes=args.num_classes,
-                                   pretrained_backbone=True).to(device)
+        model_fn = lambda: Censor(pretrained_backbone=True).to(device)
         model_name = 'Censor'
         print("Using Censor model")
     except Exception as e:

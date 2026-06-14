@@ -337,13 +337,13 @@ def _prepare_input(x):
 def train_one_fold(model, train_loader, test_loader, device, epochs, lr, log_prefix=''):
     """Train model for one LOSO fold."""
 
-    # Freeze backbone, only train fc + last layer block
-    # 33M params on ~120 samples = severe overfitting. Must freeze most layers.
+    # Freeze entire backbone, only train fc head
+    # ~150 samples with 33M params = severe overfitting
     for name, p in model.named_parameters():
-        if 'fc' in name or 'layer4' in name:
-            p.requires_grad = True   # Train fc + layer4
+        if 'fc' in name:
+            p.requires_grad = True   # ~2K params
         else:
-            p.requires_grad = False  # Freeze everything else
+            p.requires_grad = False  # Freeze everything
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
@@ -395,7 +395,7 @@ def train_one_fold(model, train_loader, test_loader, device, epochs, lr, log_pre
 
         # Eval
         if (epoch + 1) % 5 == 0 or epoch == epochs - 1:
-            acc = evaluate(model, test_loader, device)
+            acc, uf1, _, _ = evaluate(model, test_loader, device)
             if acc > best_acc:
                 best_acc = acc
                 best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
@@ -404,7 +404,7 @@ def train_one_fold(model, train_loader, test_loader, device, epochs, lr, log_pre
                 patience_counter += 1
             print(f"  {log_prefix}Epoch {epoch+1:3d}/{epochs} | "
                   f"Loss {epoch_loss/max(n_batches,1):.4f} | "
-                  f"Acc {acc*100:.2f}% | Best {best_acc*100:.2f}%")
+                  f"Acc {acc*100:.2f}% | UF1 {uf1*100:.2f}% | Best {best_acc*100:.2f}%")
 
             if patience_counter >= 15:
                 print(f"  {log_prefix}Early stopping at epoch {epoch+1}")
@@ -412,14 +412,18 @@ def train_one_fold(model, train_loader, test_loader, device, epochs, lr, log_pre
 
     if best_state is not None:
         model.load_state_dict(best_state)
-    return best_acc
+    # Final eval with best model
+    final_acc, final_uf1, preds, labels = evaluate(model, test_loader, device)
+    return final_acc, final_uf1, preds, labels
 
 
 def evaluate(model, loader, device):
-    """Compute accuracy on a loader."""
+    """Compute accuracy and per-class predictions on a loader."""
     model.eval()
     correct = 0
     total = 0
+    all_preds = []
+    all_labels = []
     with torch.no_grad():
         for batch in loader:
             x, y = _unpack_batch(batch)
@@ -430,7 +434,35 @@ def evaluate(model, loader, device):
             pred = logits.argmax(dim=1)
             correct += (pred == y).sum().item()
             total += y.size(0)
-    return correct / max(total, 1)
+            all_preds.extend(pred.cpu().tolist())
+            all_labels.extend(y.cpu().tolist())
+
+    acc = correct / max(total, 1)
+
+    # Compute UF1 (Unweighted F1) - standard MER metric
+    uf1 = compute_uf1(all_labels, all_preds)
+
+    return acc, uf1, all_preds, all_labels
+
+
+def compute_uf1(y_true, y_pred):
+    """Compute Unweighted F1 score (macro-average F1)."""
+    from sklearn.metrics import f1_score
+    try:
+        return f1_score(y_true, y_pred, average='macro', zero_division=0)
+    except ImportError:
+        # Fallback: simple macro F1
+        labels = sorted(set(y_true) | set(y_pred))
+        f1s = []
+        for lbl in labels:
+            tp = sum(1 for t, p in zip(y_true, y_pred) if t == lbl and p == lbl)
+            fp = sum(1 for t, p in zip(y_true, y_pred) if t != lbl and p == lbl)
+            fn = sum(1 for t, p in zip(y_true, y_pred) if t == lbl and p != lbl)
+            prec = tp / max(tp + fp, 1)
+            rec = tp / max(tp + fn, 1)
+            f1 = 2 * prec * rec / max(prec + rec, 1e-8)
+            f1s.append(f1)
+        return np.mean(f1s) if f1s else 0.0
 
 
 # =============================================================================
@@ -536,6 +568,7 @@ def main():
 
     # Run each fold
     fold_accuracies = []
+    fold_uf1s = []
     fold_results = []
     total_time_start = time.time()
 
@@ -570,7 +603,7 @@ def main():
         print(f"Model params: {n_params:.2f}M")
 
         fold_start = time.time()
-        fold_acc = train_one_fold(
+        fold_acc, fold_uf1, fold_preds, fold_labels = train_one_fold(
             model, train_loader, test_loader, device,
             epochs=args.epochs, lr=args.lr,
             log_prefix=f"[Fold {fold_idx+1}] ",
@@ -578,16 +611,21 @@ def main():
         fold_time = time.time() - fold_start
 
         fold_accuracies.append(fold_acc)
+        fold_uf1s.append(fold_uf1)
         fold_results.append({
             'fold': fold_idx + 1,
             'test_subject': test_subject,
             'n_samples': len(test_idx),
             'accuracy': fold_acc,
+            'uf1': fold_uf1,
+            'predictions': fold_preds,
+            'true_labels': fold_labels,
             'time_minutes': fold_time / 60,
         })
 
-        print(f"\n  Fold {fold_idx+1} result: {fold_acc*100:.2f}% in {fold_time/60:.1f} min")
-        print(f"  Running mean: {np.mean(fold_accuracies)*100:.2f}% ± {np.std(fold_accuracies)*100:.2f}%")
+        print(f"\n  Fold {fold_idx+1} result: Acc {fold_acc*100:.2f}%, UF1 {fold_uf1*100:.2f}% in {fold_time/60:.1f} min")
+        print(f"  Running: Acc {np.mean(fold_accuracies)*100:.2f}% ± {np.std(fold_accuracies)*100:.2f}%, "
+              f"UF1 {np.mean(fold_uf1s)*100:.2f}% ± {np.std(fold_uf1s)*100:.2f}%")
 
         # Free GPU memory
         del model

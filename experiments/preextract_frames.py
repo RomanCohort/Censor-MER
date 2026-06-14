@@ -35,13 +35,14 @@ def preextract(dataset_name, data_root):
 
     if dataset_name == 'casme2':
         from dataset_frames import FrameSequenceDataset
-        ds = FrameSequenceDataset(data_root, split='train', face_align=False)
+        # Load ALL samples (no train/val split) -- LOSO handles splitting
+        ds = FrameSequenceDataset(data_root, split='train', face_align=False, val_ratio=0.0)
     elif dataset_name == 'samm':
         from dataset_samm import SAMMDataset
-        ds = SAMMDataset(data_root, face_align=False)
+        ds = SAMMDataset(data_root, face_align=False, val_ratio=0.0)
     elif dataset_name == 'smic':
         from dataset_smic import SMICDataset
-        ds = SMICDataset(data_root, face_align=False)
+        ds = SMICDataset(data_root, face_align=False, val_ratio=0.0)
     else:
         raise ValueError(dataset_name)
 

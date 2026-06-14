@@ -91,13 +91,13 @@ def get_dataset(dataset_name, data_root):
     print(f"[get_dataset] No preextracted.npz found, using slow JPEG loading.")
     if dataset_name == 'casme2':
         from dataset_frames import FrameSequenceDataset
-        return FrameSequenceDataset(data_root, split='train', face_align=False)
+        return FrameSequenceDataset(data_root, split='train', face_align=False, val_ratio=0.0)
     elif dataset_name == 'samm':
         from dataset_samm import SAMMDataset
-        return SAMMDataset(data_root, face_align=False)
+        return SAMMDataset(data_root, face_align=False, val_ratio=0.0)
     elif dataset_name == 'smic':
         from dataset_smic import SMICDataset
-        return SMICDataset(data_root, face_align=False)
+        return SMICDataset(data_root, face_align=False, val_ratio=0.0)
 
 
 def get_loso_splits(dataset, dataset_name):

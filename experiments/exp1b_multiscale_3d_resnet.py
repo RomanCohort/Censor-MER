@@ -254,7 +254,7 @@ def get_loso_splits(dataset_name, data_root):
     """
     if dataset_name == 'casme2':
         from dataset_frames import FrameSequenceDataset
-        ds = FrameSequenceDataset(data_root, split='train', face_align=False)
+        ds = FrameSequenceDataset(data_root, split='train', face_align=False, val_ratio=0.0)
 
         # Get subject list from DataFrame
         subjects = sorted(ds.samples['subject'].unique())
@@ -337,19 +337,22 @@ def _prepare_input(x):
 def train_one_fold(model, train_loader, test_loader, device, epochs, lr, log_prefix=''):
     """Train model for one LOSO fold."""
 
-    # Different LR for backbone vs new layers
-    backbone_params = []
-    new_params = []
+    # Freeze backbone, only train fc + last layer block
+    # 33M params on ~120 samples = severe overfitting. Must freeze most layers.
     for name, p in model.named_parameters():
-        if 'fc' in name:
-            new_params.append(p)
+        if 'fc' in name or 'layer4' in name:
+            p.requires_grad = True   # Train fc + layer4
         else:
-            backbone_params.append(p)
+            p.requires_grad = False  # Freeze everything else
 
-    optimizer = torch.optim.AdamW([
-        {'params': backbone_params, 'lr': lr * 0.1},
-        {'params': new_params, 'lr': lr},
-    ], weight_decay=1e-4)
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in model.parameters())
+    print(f"  Trainable: {trainable/1e6:.2f}M / {total/1e6:.2f}M ({trainable/total*100:.1f}%)")
+
+    optimizer = torch.optim.AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=lr, weight_decay=1e-4
+    )
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
@@ -366,6 +369,16 @@ def train_one_fold(model, train_loader, test_loader, device, epochs, lr, log_pre
             x, y = _unpack_batch(batch)
             x = _prepare_input(x).to(device)
             y = y.to(device)
+
+            # Online augmentation for preextracted data
+            if x.shape[0] > 0:
+                # Random horizontal flip (50%)
+                if torch.rand(1).item() < 0.5:
+                    x = x.flip(-1)
+                # Random temporal jitter: shift by ±1 frame
+                if x.shape[2] > 4 and torch.rand(1).item() < 0.3:
+                    shift = torch.randint(-1, 2, (1,)).item()
+                    x = torch.roll(x, shifts=shift, dims=2)
 
             logits = model(x)
             loss = criterion(logits, y)

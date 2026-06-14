@@ -251,27 +251,17 @@ def get_dataset(dataset_name, data_root):
 
 
 def get_loso_splits(dataset, dataset_name):
-    """Build LOSO splits from dataset."""
-    if dataset_name == 'casme2':
-        from dataset_frames import FrameSequenceDataset
-        subjects = sorted(dataset.samples['subject'].unique())
-    else:
-        subjects = sorted(set(s.get('subject', 'unknown') for s in dataset.samples))
+    """Build LOSO splits from dataset. All datasets use DataFrame .samples."""
+    subjects = sorted(dataset.samples['subject'].unique())
 
     if dataset_name == 'casme2':
         subjects = [s for s in subjects if s not in CASME2_EXCLUDED]
 
     subj_to_idx = defaultdict(list)
-    if dataset_name == 'casme2':
-        for i in range(len(dataset.samples)):
-            subj = dataset.samples.iloc[i]['subject']
-            if subj in subjects:
-                subj_to_idx[subj].append(i)
-    else:
-        for i, s in enumerate(dataset.samples):
-            subj = s.get('subject', 'unknown')
-            if subj in subjects:
-                subj_to_idx[subj].append(i)
+    for i in range(len(dataset.samples)):
+        subj = dataset.samples.iloc[i]['subject']
+        if subj in subjects:
+            subj_to_idx[subj].append(i)
 
     splits = []
     for subj in subjects:

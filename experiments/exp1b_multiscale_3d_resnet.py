@@ -275,13 +275,13 @@ def get_loso_splits(dataset_name, data_root):
         return splits, len(subjects), ds
 
     elif dataset_name == 'samm':
-        from dataset_frames import FrameSequenceDataset  # reuse with SAMM loader
         from dataset_samm import SAMMDataset
         ds = SAMMDataset(data_root, face_align=False)
-        subjects = sorted(set(s.get('subject', 'unknown') for s in ds.samples))
+        # SAMMDataset.samples is a DataFrame
+        subjects = sorted(ds.samples['subject'].unique())
         subj_to_idx = defaultdict(list)
-        for i, s in enumerate(ds.samples):
-            subj = s.get('subject', 'unknown')
+        for i in range(len(ds.samples)):
+            subj = ds.samples.iloc[i]['subject']
             subj_to_idx[subj].append(i)
         splits = []
         for subj in subjects:
@@ -293,10 +293,11 @@ def get_loso_splits(dataset_name, data_root):
     elif dataset_name == 'smic':
         from dataset_smic import SMICDataset
         ds = SMICDataset(data_root, face_align=False)
-        subjects = sorted(set(s.get('subject', 'unknown') for s in ds.samples))
+        # SMICDataset.samples is a DataFrame
+        subjects = sorted(ds.samples['subject'].unique())
         subj_to_idx = defaultdict(list)
-        for i, s in enumerate(ds.samples):
-            subj = s.get('subject', 'unknown')
+        for i in range(len(ds.samples)):
+            subj = ds.samples.iloc[i]['subject']
             subj_to_idx[subj].append(i)
         splits = []
         for subj in subjects:

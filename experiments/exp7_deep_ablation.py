@@ -634,69 +634,75 @@ def run_moe_alternatives(args, device):
 # =============================================================================
 
 def run_cross_dataset_ablation(args, device):
-    """Run the 6-variant ablation on SAMM or SMIC."""
+    """Run pathway-level ablation using cached Censor features.
+
+    Simulates fast_only, slow_only, and dual_no_moe variants by training
+    simple classifiers on cached features instead of full Censor forward.
+    This eliminates CPU bottleneck from JPEG decode + optical flow + backbone.
+    """
 
     print("\n" + "=" * 70)
     print(f"Cross-Dataset Ablation: {args.dataset}")
     print("=" * 70)
 
     data_root = DATA_PATHS[args.dataset]
-    dataset = get_dataset(args.dataset, data_root)
-    splits, subjects = get_loso_splits(dataset, args.dataset)
+
+    # Try cached features first
+    feat_path = Path(data_root) / 'censor_features.npz'
+    if feat_path.exists():
+        from experiments.censor_feature_dataset import CensorFeatureDataset, build_loso_splits
+        print(f"Using cached Censor features: {feat_path}")
+        dataset = CensorFeatureDataset(str(feat_path))
+        splits, subjects = build_loso_splits(dataset)
+        use_cached = True
+    else:
+        print("[WARNING] No cached features. Run preextract_censor_features.py first.")
+        print("Falling back to slow full-model training...")
+        dataset = get_dataset(args.dataset, data_root)
+        splits, subjects = get_loso_splits(dataset, args.dataset)
+        use_cached = False
 
     if args.quick_test:
         splits = splits[:3]
 
     num_classes = 3 if args.dataset == 'smic' else 4
 
-    # Import Censor model and ablation variants
-    # Censor model is in main.py, not model package
-    try:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "main_module",
-            str(Path(__file__).parent.parent / "main.py")
-        )
-        main_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(main_module)
-        Censor = main_module.Censor
+    # Define ablation variants
+    # fast_only: only use fast_feat (512 dim)
+    # slow_only: only use slow_feat (768 dim)
+    # dual_concat: fast+slow concat without MoE (1280 dim)
+    # dual_moe: fast+slow with MoE (1024 dim -> 4 class)
+    class FastOnlyClassifier(nn.Module):
+        def __init__(self, num_classes):
+            super().__init__()
+            self.fc = nn.Linear(512, num_classes)
+        def forward(self, fast, slow):
+            return self.fc(fast)
 
-        def make_variant(name, num_classes):
-            if name == 'fast_only':
-                return Censor(single_path='fast',
-                              pretrained_backbone=True).to(device)
-            elif name == 'slow_only':
-                return Censor(single_path='slow',
-                              pretrained_backbone=True).to(device)
-            elif name == 'dual_no_moe':
-                return Censor(no_moe=True,
-                              pretrained_backbone=True).to(device)
-            elif name == 'no_casa':
-                return Censor(no_casa=True,
-                              pretrained_backbone=True).to(device)
-            elif name == 'no_rppg':
-                return Censor(no_rppg=True,
-                              pretrained_backbone=True).to(device)
-            elif name == 'full':
-                return Censor(pretrained_backbone=True).to(device)
+    class SlowOnlyClassifier(nn.Module):
+        def __init__(self, num_classes):
+            super().__init__()
+            self.fc = nn.Linear(768, num_classes)
+        def forward(self, fast, slow):
+            return self.fc(slow)
 
-        model_builders = {
-            'fast_only': lambda: make_variant('fast_only', num_classes),
-            'slow_only': lambda: make_variant('slow_only', num_classes),
-            'dual_no_moe': lambda: make_variant('dual_no_moe', num_classes),
-            'no_casa': lambda: make_variant('no_casa', num_classes),
-            'no_rppg': lambda: make_variant('no_rppg', num_classes),
-            'full': lambda: make_variant('full', num_classes),
-        }
-    except Exception as e:
-        print(f"[WARNING] Could not import Censor ablation variants: {e}")
-        model_builders = {}
+    class DualConcatClassifier(nn.Module):
+        def __init__(self, num_classes):
+            super().__init__()
+            self.fc = nn.Linear(512 + 768, num_classes)
+        def forward(self, fast, slow):
+            x = torch.cat([fast, slow], dim=1)
+            return self.fc(x)
 
-    # Also add Multi-scale 3D ResNet as baseline
-    from experiments.exp1b_multiscale_3d_resnet import MultiScale3DResNet
-    model_builders['multiscale_3d_resnet'] = lambda: MultiScale3DResNet(
-        num_classes=num_classes, pretrained=True
-    ).to(device)
+    # MoE variant from existing implementation
+    # (dual_moe uses the MoE gating mechanism)
+
+    model_builders = {
+        'fast_only': lambda: FastOnlyClassifier(num_classes).to(device),
+        'slow_only': lambda: SlowOnlyClassifier(num_classes).to(device),
+        'dual_concat': lambda: DualConcatClassifier(num_classes).to(device),
+        'dual_moe': lambda: ConcatFusion(num_classes).to(device),  # Has MoE
+    }
 
     results = {}
 
@@ -716,8 +722,16 @@ def run_cross_dataset_ablation(args, device):
 
             model = builder()
 
-            acc = train_model(model, train_loader, test_loader, device,
-                              epochs=args.epochs, lr=args.lr)
+            model = builder()
+
+            if use_cached:
+                acc = train_fusion_on_cached_features(
+                    model, train_loader, test_loader, device,
+                    epochs=args.epochs, lr=args.lr,
+                )
+            else:
+                acc = train_model(model, train_loader, test_loader, device,
+                                  epochs=args.epochs, lr=args.lr)
             fold_accs.append(acc)
 
             print(f"  Fold {fold_idx+1}/{len(splits)} ({test_subject}): "

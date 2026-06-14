@@ -285,35 +285,50 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
 
-    # Load dataset
+    # Load dataset - prefer cached Censor features
     data_root = DATA_PATHS[args.dataset]
-    dataset = get_dataset(args.dataset, data_root)
-    splits, subjects = get_loso_splits(dataset, args.dataset)
+    feat_path = Path(data_root) / 'censor_features.npz'
+    if feat_path.exists():
+        from experiments.censor_feature_dataset import CensorFeatureDataset, build_loso_splits
+        print(f"Using cached Censor features: {feat_path}")
+        dataset = CensorFeatureDataset(str(feat_path))
+        splits, subjects = build_loso_splits(dataset)
+        use_cached = True
+    else:
+        print("[WARNING] No cached features. Run preextract_censor_features.py first!")
+        dataset = get_dataset(args.dataset, data_root)
+        splits, subjects = get_loso_splits(dataset, args.dataset)
+        use_cached = False
 
     if args.quick_test:
         splits = splits[:3]
 
     print(f"Total samples: {len(dataset.samples)}, Folds: {len(splits)}")
 
-    # Load Censor model (defined in main.py, not model/__init__.py)
-    try:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "main_module",
-            str(Path(__file__).parent.parent / "main.py")
-        )
-        main_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(main_module)
-        Censor = main_module.Censor
-        model_fn = lambda: Censor(pretrained_backbone=True).to(device)
-        model_name = 'Censor'
-        print("Using Censor model")
-    except Exception as e:
-        from experiments.exp1b_multiscale_3d_resnet import MultiScale3DResNet
-        model_fn = lambda: MultiScale3DResNet(num_classes=args.num_classes,
-                                               pretrained=True).to(device)
-        model_name = 'Multi-scale 3D ResNet'
-        print(f"Using {model_name} (Censor not available: {e})")
+    # When using cached features, we only need a lightweight fusion head
+    if use_cached:
+        from experiments.exp7_deep_ablation import ConcatFusion
+        model_fn = lambda: ConcatFusion(num_classes=args.num_classes).to(device)
+        model_name = 'Censor (cached features + fusion head)'
+        print(f"Using {model_name} on cached features")
+    else:
+        # Load full Censor model
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                "main_module", str(Path(__file__).parent.parent / "main.py"))
+            main_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(main_module)
+            Censor = main_module.Censor
+            model_fn = lambda: Censor(pretrained_backbone=True).to(device)
+            model_name = 'Censor'
+            print("Using full Censor model")
+        except Exception as e:
+            from experiments.exp1b_multiscale_3d_resnet import MultiScale3DResNet
+            model_fn = lambda: MultiScale3DResNet(num_classes=args.num_classes,
+                                                   pretrained=True).to(device)
+            model_name = 'Multi-scale 3D ResNet'
+            print(f"Using {model_name} (Censor not available: {e})")
 
     # Accumulate results across folds
     all_true = []
@@ -335,16 +350,38 @@ def main():
                                  shuffle=False, num_workers=0, pin_memory=True)
 
         # Build and train model
-        from experiments.exp1b_multiscale_3d_resnet import train_one_fold
         model = model_fn()
 
-        acc = train_one_fold(model, train_loader, test_loader, device,
-                             epochs=50, lr=1e-4,
-                             log_prefix=f'[Fold {fold_idx+1}] ')
-
-        # Extract predictions and features
-        features, preds, labels, probs = extract_features_and_predictions(
-            model, test_loader, device)
+        if use_cached:
+            from experiments.exp7_deep_ablation import train_fusion_on_cached_features, evaluate_fusion_cached
+            acc = train_fusion_on_cached_features(
+                model, train_loader, test_loader, device,
+                epochs=50, lr=1e-3,
+            )
+            # Extract predictions from cached features
+            model.eval()
+            preds_list, labels_list, probs_list = [], [], []
+            with torch.no_grad():
+                for batch in test_loader:
+                    fast_feat, slow_feat, y = batch
+                    fast_feat = fast_feat.to(device)
+                    slow_feat = slow_feat.to(device)
+                    logits = model(fast_feat, slow_feat)
+                    probs = torch.softmax(logits, dim=1)
+                    preds_list.extend(logits.argmax(1).cpu().tolist())
+                    labels_list.extend(y.tolist())
+                    probs_list.append(probs.cpu())
+            features = None  # Not available in cached mode
+            preds = preds_list
+            labels = labels_list
+            probs = torch.cat(probs_list, dim=0) if probs_list else torch.tensor([])
+        else:
+            from experiments.exp1b_multiscale_3d_resnet import train_one_fold
+            acc = train_one_fold(model, train_loader, test_loader, device,
+                                 epochs=50, lr=1e-4,
+                                 log_prefix=f'[Fold {fold_idx+1}] ')
+            features, preds, labels, probs = extract_features_and_predictions(
+                model, test_loader, device)
 
         fold_accuracies.append(acc)
         fold_details.append({

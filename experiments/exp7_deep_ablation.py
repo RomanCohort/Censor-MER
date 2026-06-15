@@ -939,9 +939,9 @@ def main():
     parser.add_argument('--quick_test', action='store_true')
     args = parser.parse_args()
 
-    # Auto-set num_classes
+    # Auto-set num_classes (5-class if using include_others)
     if args.num_classes is None:
-        args.num_classes = 3 if args.dataset == 'smic' else 4
+        args.num_classes = 3 if args.dataset == 'smic' else 5  # Default to 5-class for CASME2/SAMM
 
     print("=" * 70)
     print(f"Experiment 7: Component Deep Ablation - {args.experiment}")

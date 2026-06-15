@@ -4,6 +4,7 @@ This eliminates per-epoch JPEG decoding overhead (the main CPU bottleneck).
 
 Usage:
   python experiments/preextract_frames.py --dataset casme2
+  python experiments/preextract_frames.py --dataset casme2 --include-others  # 5-class (249 samples)
   python experiments/preextract_frames.py --dataset samm
   python experiments/preextract_frames.py --dataset smic
 
@@ -30,13 +31,16 @@ DATA_PATHS = {
 }
 
 
-def preextract(dataset_name, data_root):
+def preextract(dataset_name, data_root, include_others=False):
     print(f"Pre-extracting {dataset_name} from {data_root}")
+    if include_others:
+        print(f"  Mode: 5-class (including 'others')")
 
     if dataset_name == 'casme2':
         from dataset_frames import FrameSequenceDataset
         # Load ALL samples (no train/val split) -- LOSO handles splitting
-        ds = FrameSequenceDataset(data_root, split='train', face_align=False, val_ratio=0.0)
+        ds = FrameSequenceDataset(data_root, split='train', face_align=False,
+                                  val_ratio=0.0, include_others=include_others)
     elif dataset_name == 'samm':
         from dataset_samm import SAMMDataset
         ds = SAMMDataset(data_root, face_align=False, val_ratio=0.0)
@@ -118,6 +122,8 @@ def preextract(dataset_name, data_root):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', required=True, choices=['casme2', 'samm', 'smic'])
+    parser.add_argument('--include-others', action='store_true',
+                        help='Include "others" class for 5-class classification (CASME2 only)')
     args = parser.parse_args()
 
     data_root = DATA_PATHS[args.dataset]
@@ -125,7 +131,7 @@ def main():
         print(f"[ERROR] Data not found: {data_root}")
         return
 
-    preextract(args.dataset, data_root)
+    preextract(args.dataset, data_root, include_others=args.include_others)
 
 
 if __name__ == '__main__':

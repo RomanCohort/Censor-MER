@@ -210,16 +210,21 @@ class FrameSequenceDataset(Dataset):
         video_path, subject, filename, me_label, emotion, onset, apex, offset, num_frames
     """
 
-    EMOTION_NAMES = [
+    EMOTION_NAMES_4CLASS = [
         'happiness', 'surprise', 'disgust', 'repression'
     ]
 
-    # 4-class: exclude others (too noisy, 41% of data, hurts learning)
-    EXCLUDE_EMOTIONS = {'sadness', 'fear', 'anger', 'contempt', 'others'}
+    EMOTION_NAMES_5CLASS = [
+        'happiness', 'surprise', 'disgust', 'repression', 'others'
+    ]
+
+    # Always exclude these (too few samples: sadness=4, fear=2)
+    EXCLUDE_EMOTIONS_ALWAYS = {'sadness', 'fear', 'anger', 'contempt'}
 
     def __init__(self, data_root, split='train', T=None, H=None, W=None,
                  augment=None, temporal_jitter=None, val_ratio=0.2, seed=42,
-                 face_align=True, loso_fold=None, loso_subjects=None):
+                 face_align=True, loso_fold=None, loso_subjects=None,
+                 include_others=False):
         """
         Args:
             data_root (str): Root directory of CASME2 data
@@ -244,6 +249,17 @@ class FrameSequenceDataset(Dataset):
         self.augment = augment if augment is not None else DATA_CONFIG['augment']
         self.temporal_jitter = temporal_jitter if temporal_jitter is not None else DATA_CONFIG['temporal_jitter']
         self.face_align = face_align
+        self.include_others = include_others
+
+        # Set emotion names and exclude set based on include_others
+        if include_others:
+            self.EMOTION_NAMES = self.EMOTION_NAMES_5CLASS
+            self.EXCLUDE_EMOTIONS = self.EXCLUDE_EMOTIONS_ALWAYS
+            self.num_classes = 5
+        else:
+            self.EMOTION_NAMES = self.EMOTION_NAMES_4CLASS
+            self.EXCLUDE_EMOTIONS = self.EXCLUDE_EMOTIONS_ALWAYS | {'others'}
+            self.num_classes = 4
 
         self.cropped_dir = os.path.join(data_root, 'cropped')
 
@@ -278,9 +294,15 @@ class FrameSequenceDataset(Dataset):
         df.columns = ['Subject', 'Filename', 'Unnamed2', 'OnsetFrame', 'ApexFrame',
                       'OffsetFrame', 'Unnamed6', 'ActionUnits', 'Emotion']
 
-        emotion_map = {
+        emotion_map_4class = {
             'happiness': 0, 'surprise': 1, 'disgust': 2, 'repression': 3,
         }
+
+        emotion_map_5class = {
+            'happiness': 0, 'surprise': 1, 'disgust': 2, 'repression': 3, 'others': 4,
+        }
+
+        emotion_map = emotion_map_5class if self.include_others else emotion_map_4class
 
         samples = []
         for idx, row in df.iterrows():
@@ -293,7 +315,7 @@ class FrameSequenceDataset(Dataset):
 
             emotion = str(row['Emotion']).strip().lower() if pd.notna(row['Emotion']) else 'others'
 
-            # Skip 'others' class -- too noisy for 255-sample training
+            # Skip excluded emotions (sadness, fear, anger, contempt)
             if emotion in self.EXCLUDE_EMOTIONS:
                 continue
 

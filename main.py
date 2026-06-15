@@ -484,6 +484,101 @@ class Censor(nn.Module):
             'sparse_stats': all_sparse_stats,
         }
 
+    def extract_fast_features(self, x):
+        """Extract fast pathway features only (for cached feature extraction)."""
+        B, C, T, H, W = x.shape
+
+        # Saliency
+        saliency_map = self.saliency(x)
+        x_salient = x * (1.0 + 0.3 * saliency_map.expand(-1, C, -1, -1, -1))
+
+        # Frame difference as motion proxy
+        diff = x_salient[:, :, 1:, :, :] - x_salient[:, :, :-1, :, :]
+        flow_x = diff.mean(dim=1, keepdim=True)
+        flow_y = diff.std(dim=1, keepdim=True)
+        flow_x_pad = flow_x[:, :, -1:, :, :]
+        flow_y_pad = flow_y[:, :, -1:, :, :]
+        flow_x = torch.cat([flow_x, flow_x_pad], dim=2)
+        flow_y = torch.cat([flow_y, flow_y_pad], dim=2)
+        flow_stack = torch.cat([flow_x, flow_y], dim=1)
+
+        # Fast pathway
+        fast_feat = self.fast_pathway(flow_stack)
+        return fast_feat
+
+    def extract_slow_features(self, x):
+        """Extract slow pathway features only (for cached feature extraction)."""
+        B, C, T, H, W = x.shape
+
+        # Saliency
+        saliency_map = self.saliency(x)
+        x_salient = x * (1.0 + 0.3 * saliency_map.expand(-1, C, -1, -1, -1))
+
+        # rPPG heatmap
+        if self.no_rppg:
+            rppg_heatmap = torch.zeros_like(x_salient)
+        elif self.diff_mode:
+            onset_frame = x_salient[:, :, 0:1, :, :]
+            apex_idx = T // 2
+            apex_frame = x_salient[:, :, apex_idx:apex_idx+1, :, :]
+            onset_apex_diff = apex_frame - onset_frame
+            rppg_heatmap = onset_apex_diff.expand(-1, -1, T, -1, -1)
+        else:
+            rppg_heatmap = self.rppg(x_salient)
+
+        # Concatenate RGB + rPPG
+        rgb_rppg = torch.cat([x_salient, rppg_heatmap], dim=1)
+
+        # Slow pathway
+        slow_feat, slow_spatial = self.slow_pathway(rgb_rppg)
+        return slow_feat
+
+    def extract_rgb_features(self, x):
+        """Extract RGB-only slow pathway features (without rPPG, for ablation)."""
+        B, C, T, H, W = x.shape
+
+        # Saliency
+        saliency_map = self.saliency(x)
+        x_salient = x * (1.0 + 0.3 * saliency_map.expand(-1, C, -1, -1, -1))
+
+        # Zero rPPG
+        rppg_heatmap = torch.zeros_like(x_salient)
+
+        # Concatenate RGB + zero rPPG
+        rgb_rppg = torch.cat([x_salient, rppg_heatmap], dim=1)
+
+        # Slow pathway
+        slow_feat, _ = self.slow_pathway(rgb_rppg)
+        return slow_feat
+
+    def extract_rppg_features(self, x):
+        """Extract rPPG-only features (for ablation)."""
+        B, C, T, H, W = x.shape
+
+        # Saliency
+        saliency_map = self.saliency(x)
+        x_salient = x * (1.0 + 0.3 * saliency_map.expand(-1, C, -1, -1, -1))
+
+        # rPPG heatmap
+        if self.no_rppg:
+            rppg_heatmap = torch.zeros_like(x_salient)
+        elif self.diff_mode:
+            onset_frame = x_salient[:, :, 0:1, :, :]
+            apex_idx = T // 2
+            apex_frame = x_salient[:, :, apex_idx:apex_idx+1, :, :]
+            onset_apex_diff = apex_frame - onset_frame
+            rppg_heatmap = onset_apex_diff.expand(-1, -1, T, -1, -1)
+        else:
+            rppg_heatmap = self.rppg(x_salient)
+
+        # Zero RGB, only rPPG
+        zero_rgb = torch.zeros_like(x_salient)
+        rppg_only = torch.cat([zero_rgb, rppg_heatmap], dim=1)
+
+        # Slow pathway
+        slow_feat, _ = self.slow_pathway(rppg_only)
+        return slow_feat
+
 
 # =============================================================================
 # Main Entry Point
